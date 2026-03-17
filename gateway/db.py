@@ -4,6 +4,7 @@
 
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from gateway.core.settings import get_settings
 from sqlalchemy.ext.asyncio import (
@@ -21,6 +22,39 @@ engine: AsyncEngine | None = None
 async_session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def _adapt_url_for_asyncpg(url: str) -> str:
+    """将通用 PostgreSQL 连接字符串适配为 asyncpg 兼容格式。
+
+    - 替换 scheme 为 postgresql+asyncpg
+    - 将 sslmode 参数转换为 asyncpg 的 ssl 参数
+    """
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+    elif url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://"):]
+
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+
+    if "sslmode" in params:
+        sslmode = params.pop("sslmode")[0]
+        ssl_mapping = {
+            "disable": "false",
+            "allow": "false",
+            "prefer": "prefer",
+            "require": "require",
+            "verify-ca": "verify-ca",
+            "verify-full": "verify-full",
+        }
+        ssl_value = ssl_mapping.get(sslmode, "prefer")
+        if ssl_value != "false":
+            params["ssl"] = [ssl_value]
+
+    new_query = urlencode({k: v[0] for k, v in params.items()})
+    adapted = parsed._replace(query=new_query)
+    return urlunparse(adapted)
+
+
 def get_database_url() -> str:
     """
     获取异步数据库连接 URL。
@@ -28,10 +62,7 @@ def get_database_url() -> str:
     未设置时回退到独立字段拼接。
     """
     if settings.database_url:
-        url = settings.database_url
-        if url.startswith("postgresql://"):
-            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        return url
+        return _adapt_url_for_asyncpg(settings.database_url)
 
     return (
         f"postgresql+asyncpg://{settings.db_user}:{settings.db_password}"
