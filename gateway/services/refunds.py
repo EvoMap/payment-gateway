@@ -193,6 +193,7 @@ class RefundService:
             payment_id=payment.id,
             refund_amount=refund_amount,
             reason=req.reason,
+            notify_url=req.notify_url,
             status=refund_status,
             provider=payment.provider,
             provider_refund_id=provider_refund_id,

@@ -409,6 +409,12 @@ class Refund(Base):
         comment="渠道侧退款ID",
     )
 
+    notify_url: Mapped[str | None] = mapped_column(
+        String(2048),
+        nullable=True,
+        comment="退款结果回调通知地址（覆盖 App 默认）",
+    )
+
     extra_data: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB,
         nullable=True,

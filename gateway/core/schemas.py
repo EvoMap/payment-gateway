@@ -203,6 +203,9 @@ class CreateRefundRequest(BaseModel):
         None, gt=0, description="退款金额（最小货币单位，如分）。不填则为全额退款"
     )
     reason: str | None = Field(None, max_length=500, description="退款原因")
+    notify_url: str | None = Field(
+        None, max_length=2048, description="退款结果回调通知地址（覆盖 App 默认）"
+    )
 
 
 class RefundResponse(BaseModel):
@@ -212,6 +215,7 @@ class RefundResponse(BaseModel):
     payment_id: UUID
     refund_amount: int
     reason: str | None
+    notify_url: str | None
     status: RefundStatus
     provider: Provider
     provider_refund_id: str | None

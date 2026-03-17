@@ -315,9 +315,10 @@ class CallbackService:
         event_id: str,
         event_type: str,
         payload: dict,
+        notify_url_override: str | None = None,
     ):
         """生成 WebhookDelivery 任务"""
-        notify_url = payment.notify_url
+        notify_url = notify_url_override or payment.notify_url
         if not notify_url:
             stmt = select(App.notify_url).where(App.id == payment.app_id)
             result = await self.session.execute(stmt)
@@ -430,4 +431,5 @@ class CallbackService:
                 "reason": refund.reason,
                 "currency": payment.currency.value,
             },
+            notify_url_override=refund.notify_url,
         )
