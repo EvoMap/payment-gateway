@@ -315,7 +315,6 @@ class CallbackService:
         event_id: str,
         event_type: str,
         payload: dict,
-        path_suffix: str,
     ):
         """生成 WebhookDelivery 任务"""
         notify_url = payment.notify_url
@@ -331,8 +330,6 @@ class CallbackService:
                 app_id=str(payment.app_id),
             )
             return
-
-        notify_url = notify_url.rstrip("/") + path_suffix
 
         payload = {
             "event_id": event_id,
@@ -410,7 +407,6 @@ class CallbackService:
                 "provider_txn_id": payment.provider_txn_id,
                 "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
             },
-            path_suffix="/callback/payment",
         )
 
     async def _create_refund_webhook_delivery(
@@ -434,5 +430,4 @@ class CallbackService:
                 "reason": refund.reason,
                 "currency": payment.currency.value,
             },
-            path_suffix="/callback/refund",
         )
