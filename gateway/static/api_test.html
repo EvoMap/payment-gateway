@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Payment Gateway - API 测试台</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --bg-card: #1a1d27;
+  --bg-input: #252835;
+  --bg-sidebar: #14161e;
+  --border: #2d3148;
+  --text: #e1e4ed;
+  --text-dim: #8b8fa7;
+  --accent: #6c7ee1;
+  --accent-hover: #8290f0;
+  --green: #4cce8e;
+  --red: #e5534b;
+  --orange: #e59e4c;
+  --blue: #4c9ae5;
+  --purple: #b46ce5;
+  --method-get: #4cce8e;
+  --method-post: #6c7ee1;
+  --method-put: #e59e4c;
+  --method-delete: #e5534b;
+  --method-patch: #b46ce5;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Top Bar */
+.top-bar {
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+.top-bar .logo {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+  letter-spacing: -0.3px;
+}
+.top-bar .logo span { color: var(--text-dim); font-weight: 400; }
+.top-bar label {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.top-bar input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color .2s;
+}
+.top-bar input:focus { border-color: var(--accent); }
+.top-bar .base-url-input { width: 260px; }
+.top-bar .api-key-input { width: 320px; font-family: monospace; }
+.top-bar .status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+}
+.top-bar .status-dot.ok { background: var(--green); }
+.top-bar .status-dot.err { background: var(--red); }
+.health-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all .2s;
+}
+.health-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Layout */
+.main-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 280px;
+  min-width: 280px;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+.sidebar::-webkit-scrollbar { width: 4px; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.sidebar-group { border-bottom: 1px solid var(--border); }
+.sidebar-group-title {
+  padding: 12px 16px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.sidebar-group-title::after {
+  content: '▾';
+  font-size: 10px;
+  transition: transform .2s;
+}
+.sidebar-group.collapsed .sidebar-group-title::after { transform: rotate(-90deg); }
+.sidebar-group.collapsed .sidebar-items { display: none; }
+.sidebar-item {
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background .15s;
+  border-left: 2px solid transparent;
+}
+.sidebar-item:hover { background: rgba(108,126,225,.08); }
+.sidebar-item.active {
+  background: rgba(108,126,225,.12);
+  border-left-color: var(--accent);
+}
+.method-tag {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: monospace;
+  min-width: 42px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.method-tag.GET { background: rgba(76,206,142,.15); color: var(--method-get); }
+.method-tag.POST { background: rgba(108,126,225,.15); color: var(--method-post); }
+.method-tag.PUT { background: rgba(229,158,76,.15); color: var(--method-put); }
+.method-tag.DELETE { background: rgba(229,83,75,.15); color: var(--method-delete); }
+.method-tag.PATCH { background: rgba(180,108,229,.15); color: var(--method-patch); }
+.sidebar-item .path {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Content */
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.content-header {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.content-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.content-header .desc {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.content-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* Request Panel */
+.request-panel {
+  flex: 1;
+  padding: 20px 24px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+.request-panel::-webkit-scrollbar { width: 4px; }
+.request-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.form-section {
+  margin-bottom: 20px;
+}
+.form-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.form-row label {
+  width: 160px;
+  min-width: 160px;
+  font-size: 13px;
+  padding-top: 7px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+}
+.form-row label .type-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+.form-row label .required {
+  color: var(--red);
+  margin-left: 2px;
+}
+.form-row input, .form-row select, .form-row textarea {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 7px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color .2s;
+  font-family: inherit;
+}
+.form-row textarea {
+  font-family: monospace;
+  font-size: 12px;
+  min-height: 80px;
+  resize: vertical;
+}
+.form-row input:focus, .form-row select:focus, .form-row textarea:focus {
+  border-color: var(--accent);
+}
+.form-row select { cursor: pointer; }
+.form-row select option { background: var(--bg-input); }
+
+.send-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 10px 32px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .2s;
+  margin-top: 8px;
+}
+.send-btn:hover { background: var(--accent-hover); transform: translateY(-1px); }
+.send-btn:active { transform: translateY(0); }
+.send-btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Response Panel */
+.response-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.response-header {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.response-header .title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--text-dim);
+}
+.status-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-family: monospace;
+}
+.status-badge.s2xx { background: rgba(76,206,142,.15); color: var(--green); }
+.status-badge.s4xx { background: rgba(229,158,76,.15); color: var(--orange); }
+.status-badge.s5xx { background: rgba(229,83,75,.15); color: var(--red); }
+.response-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: monospace;
+  margin-left: auto;
+}
+.response-body {
+  flex: 1;
+  overflow: auto;
+  padding: 16px 20px;
+}
+.response-body::-webkit-scrollbar { width: 4px; }
+.response-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.response-body pre {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.json-key { color: #7eb6f6; }
+.json-string { color: #ce9178; }
+.json-number { color: #b5cea8; }
+.json-bool { color: #569cd6; }
+.json-null { color: #808080; }
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-dim);
+  font-size: 14px;
+  flex-direction: column;
+  gap: 8px;
+}
+.empty-state .icon { font-size: 40px; opacity: .3; }
+
+.copy-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 2px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: all .2s;
+}
+.copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+  <div class="logo">Payment Gateway <span>API 测试台</span></div>
+  <label>Base URL</label>
+  <input type="text" class="base-url-input" id="baseUrl" value="" placeholder="http://localhost:8000">
+  <label>API Key</label>
+  <input type="text" class="api-key-input" id="apiKey" placeholder="从管理接口创建应用获取">
+  <div class="status-dot" id="statusDot"></div>
+  <button class="health-btn" onclick="checkHealth()">健康检查</button>
+</div>
+
+<div class="main-layout">
+  <div class="sidebar" id="sidebar"></div>
+  <div class="content">
+    <div class="content-header" id="contentHeader">
+      <h2 id="endpointTitle">
+        <span>选择一个接口开始测试</span>
+      </h2>
+      <div class="desc" id="endpointDesc">从左侧列表选择要测试的 API 接口</div>
+    </div>
+    <div class="content-body">
+      <div class="request-panel" id="requestPanel">
+        <div class="empty-state">
+          <div class="icon">⚡</div>
+          <div>选择一个接口，开始发送请求</div>
+        </div>
+      </div>
+      <div class="response-panel">
+        <div class="response-header">
+          <span class="title">响应</span>
+          <span class="status-badge" id="statusBadge" style="display:none"></span>
+          <span class="response-time" id="responseTime"></span>
+          <button class="copy-btn" id="copyBtn" style="display:none" onclick="copyResponse()">复制</button>
+        </div>
+        <div class="response-body" id="responseBody">
+          <div class="empty-state">
+            <div class="icon">📋</div>
+            <div>发送请求后在此查看响应</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const ENDPOINTS = [
+  {
+    group: '基础',
+    items: [
+      {
+        id: 'root', method: 'GET', path: '/', name: '服务信息',
+        desc: '获取服务名称和版本号', auth: false, params: []
+      },
+      {
+        id: 'health', method: 'GET', path: '/health', name: '健康检查',
+        desc: '检查服务和数据库的健康状态', auth: false, params: []
+      },
+    ]
+  },
+  {
+    group: '应用管理 (Admin)',
+    items: [
+      {
+        id: 'create_app', method: 'POST', path: '/v1/admin/apps', name: '创建应用',
+        desc: '创建新应用并生成 API Key', auth: false,
+        params: [
+          { name: 'name', label: '应用名称', type: 'string', required: true, place: 'body' },
+          { name: 'notify_url', label: '默认回调地址', type: 'string', required: false, place: 'body', placeholder: 'https://example.com/callback' },
+        ]
+      },
+      {
+        id: 'list_apps', method: 'GET', path: '/v1/admin/apps', name: '应用列表',
+        desc: '获取所有应用列表，支持分页', auth: false,
+        params: [
+          { name: 'skip', label: '跳过记录数', type: 'integer', required: false, place: 'query', default: '0' },
+          { name: 'limit', label: '最大记录数', type: 'integer', required: false, place: 'query', default: '100' },
+        ]
+      },
+      {
+        id: 'get_app', method: 'GET', path: '/v1/admin/apps/{app_id}', name: '应用详情',
+        desc: '根据应用 ID 获取详细信息', auth: false,
+        params: [
+          { name: 'app_id', label: '应用 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'delete_app', method: 'DELETE', path: '/v1/admin/apps/{app_id}', name: '删除应用',
+        desc: '根据应用 ID 删除应用', auth: false,
+        params: [
+          { name: 'app_id', label: '应用 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'update_app_status', method: 'PATCH', path: '/v1/admin/apps/{app_id}/status', name: '更新应用状态',
+        desc: '启用或禁用应用', auth: false,
+        params: [
+          { name: 'app_id', label: '应用 ID', type: 'uuid', required: true, place: 'path' },
+          { name: 'is_active', label: '是否启用', type: 'boolean', required: true, place: 'query' },
+        ]
+      },
+    ]
+  },
+  {
+    group: '支付 (Payments)',
+    items: [
+      {
+        id: 'create_payment', method: 'POST', path: '/v1/payments', name: '创建支付',
+        desc: '创建支付订单，返回支付链接或客户端密钥', auth: true,
+        params: [
+          { name: 'merchant_order_no', label: '商户订单号', type: 'string', required: true, place: 'body', placeholder: 'ORDER_001' },
+          { name: 'provider', label: '支付渠道', type: 'enum', required: true, place: 'body', options: ['stripe'] },
+          { name: 'currency', label: '币种', type: 'enum', required: true, place: 'body', options: ['USD','CNY','HKD','KRW','THB','EUR','GBP','JPY','INR'] },
+          { name: 'quantity', label: '商品数量', type: 'integer', required: true, place: 'body', default: '1' },
+          { name: 'unit_amount', label: '单价 (最小货币单位)', type: 'integer', required: false, place: 'body', placeholder: '1000 = $10.00' },
+          { name: 'product_name', label: '商品名称', type: 'string', required: false, place: 'body' },
+          { name: 'product_desc', label: '商品描述', type: 'string', required: false, place: 'body' },
+          { name: 'notify_url', label: '回调地址', type: 'string', required: false, place: 'body' },
+          { name: 'expire_minutes', label: '过期时间 (分钟)', type: 'integer', required: false, place: 'body' },
+          { name: 'success_url', label: '成功跳转 URL', type: 'string', required: false, place: 'body', placeholder: 'https://example.com/success' },
+          { name: 'cancel_url', label: '取消跳转 URL', type: 'string', required: false, place: 'body', placeholder: 'https://example.com/cancel' },
+          { name: 'metadata', label: '元数据 (JSON)', type: 'json', required: false, place: 'body', placeholder: '{"key": "value"}' },
+          { name: 'external_user_id', label: '用户标识', type: 'string', required: false, place: 'body' },
+        ]
+      },
+      {
+        id: 'get_payment', method: 'GET', path: '/v1/payments/{payment_id}', name: '查询支付详情',
+        desc: '根据支付 ID 查询支付详细信息', auth: true,
+        params: [
+          { name: 'payment_id', label: '支付 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'list_payments', method: 'GET', path: '/v1/payments', name: '支付列表',
+        desc: '查询支付列表，支持分页和状态过滤', auth: true,
+        params: [
+          { name: 'page', label: '页码', type: 'integer', required: false, place: 'query', default: '1' },
+          { name: 'page_size', label: '每页数量', type: 'integer', required: false, place: 'query', default: '20' },
+          { name: 'status', label: '支付状态', type: 'enum', required: false, place: 'query', options: ['', 'pending','succeeded','failed','canceled'] },
+        ]
+      },
+      {
+        id: 'cancel_payment', method: 'POST', path: '/v1/payments/cancel', name: '取消支付',
+        desc: '取消待支付状态的订单', auth: true,
+        params: [
+          { name: 'merchant_order_no', label: '商户订单号', type: 'string', required: true, place: 'body' },
+          { name: 'payment_id', label: '支付 ID', type: 'uuid', required: true, place: 'body' },
+        ]
+      },
+      {
+        id: 'get_payment_by_order', method: 'GET', path: '/v1/payments/order/{merchant_order_no}', name: '按订单号查询',
+        desc: '通过商户订单号查询支付信息', auth: true,
+        params: [
+          { name: 'merchant_order_no', label: '商户订单号', type: 'string', required: true, place: 'path' },
+        ]
+      },
+    ]
+  },
+  {
+    group: '模拟 & 退款 (Admin)',
+    items: [
+      {
+        id: 'test_success', method: 'POST', path: '/v1/admin/payments/{payment_id}/test-success', name: '模拟支付成功',
+        desc: '测试用：直接模拟支付成功并触发回调流程', auth: false,
+        params: [
+          { name: 'payment_id', label: '支付 ID', type: 'uuid', required: true, place: 'path' },
+          { name: 'provider', label: '支付渠道', type: 'enum', required: true, place: 'body', options: ['stripe'] },
+        ]
+      },
+      {
+        id: 'create_refund', method: 'POST', path: '/v1/admin/refunds', name: '创建退款',
+        desc: '创建退款请求 (支持全额和部分退款)', auth: false,
+        params: [
+          { name: 'payment_id', label: '支付 ID', type: 'uuid', required: true, place: 'body' },
+          { name: 'refund_amount', label: '退款金额 (最小货币单位)', type: 'integer', required: false, place: 'body', placeholder: '不填则全额退款' },
+          { name: 'reason', label: '退款原因', type: 'string', required: false, place: 'body' },
+          { name: 'notify_url', label: '退款回调地址', type: 'string', required: false, place: 'body' },
+        ]
+      },
+      {
+        id: 'get_refund', method: 'GET', path: '/v1/admin/refunds/{refund_id}', name: '查询退款详情',
+        desc: '根据退款 ID 获取退款详细信息', auth: false,
+        params: [
+          { name: 'refund_id', label: '退款 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'list_refunds', method: 'GET', path: '/v1/admin/payments/{payment_id}/refunds', name: '查询退款列表',
+        desc: '获取指定支付的所有退款记录', auth: false,
+        params: [
+          { name: 'payment_id', label: '支付 ID', type: 'uuid', required: true, place: 'path' },
+          { name: 'skip', label: '跳过记录数', type: 'integer', required: false, place: 'query', default: '0' },
+          { name: 'limit', label: '最大记录数', type: 'integer', required: false, place: 'query', default: '100' },
+        ]
+      },
+      {
+        id: 'sync_refund', method: 'POST', path: '/v1/admin/refunds/{refund_id}/sync', name: '同步退款状态',
+        desc: '从支付渠道同步最新退款状态', auth: false,
+        params: [
+          { name: 'refund_id', label: '退款 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+    ]
+  },
+  {
+    group: '订阅计划 (Plans)',
+    items: [
+      {
+        id: 'create_plan', method: 'POST', path: '/v1/plans', name: '创建计划',
+        desc: '创建新的订阅计划', auth: true,
+        params: [
+          { name: 'provider', label: '支付渠道', type: 'enum', required: true, place: 'body', options: ['stripe'] },
+          { name: 'slug', label: '计划标识 (slug)', type: 'string', required: true, place: 'body', placeholder: 'pro-monthly' },
+          { name: 'name', label: '计划名称', type: 'string', required: true, place: 'body', placeholder: 'Pro 月付' },
+          { name: 'description', label: '描述', type: 'string', required: false, place: 'body' },
+          { name: 'amount', label: '金额 (最小货币单位)', type: 'integer', required: true, place: 'body', placeholder: '1990 = $19.90' },
+          { name: 'currency', label: '币种', type: 'enum', required: true, place: 'body', options: ['USD','CNY','HKD','KRW','THB','EUR','GBP','JPY','INR'] },
+          { name: 'interval', label: '计费周期', type: 'enum', required: true, place: 'body', options: ['week','month','quarter','year'] },
+          { name: 'interval_count', label: '周期倍数', type: 'integer', required: false, place: 'body', default: '1' },
+          { name: 'tier', label: '层级', type: 'integer', required: false, place: 'body', default: '0' },
+          { name: 'features', label: '功能特性 (JSON)', type: 'json', required: false, place: 'body', placeholder: '{"max_users": 10}' },
+        ]
+      },
+      {
+        id: 'list_plans', method: 'GET', path: '/v1/plans', name: '计划列表',
+        desc: '查询订阅计划列表', auth: true,
+        params: [
+          { name: 'page', label: '页码', type: 'integer', required: false, place: 'query', default: '1' },
+          { name: 'page_size', label: '每页数量', type: 'integer', required: false, place: 'query', default: '20' },
+        ]
+      },
+      {
+        id: 'get_plan', method: 'GET', path: '/v1/plans/{plan_id}', name: '计划详情',
+        desc: '根据计划 ID 查询详情', auth: true,
+        params: [
+          { name: 'plan_id', label: '计划 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'update_plan', method: 'PUT', path: '/v1/plans/{plan_id}', name: '更新计划',
+        desc: '更新订阅计划的属性', auth: true,
+        params: [
+          { name: 'plan_id', label: '计划 ID', type: 'uuid', required: true, place: 'path' },
+          { name: 'name', label: '计划名称', type: 'string', required: false, place: 'body' },
+          { name: 'description', label: '描述', type: 'string', required: false, place: 'body' },
+          { name: 'amount', label: '金额', type: 'integer', required: false, place: 'body' },
+          { name: 'tier', label: '层级', type: 'integer', required: false, place: 'body' },
+          { name: 'features', label: '功能特性 (JSON)', type: 'json', required: false, place: 'body' },
+          { name: 'is_active', label: '是否启用', type: 'boolean', required: false, place: 'body' },
+        ]
+      },
+      {
+        id: 'deactivate_plan', method: 'DELETE', path: '/v1/plans/{plan_id}', name: '停用计划',
+        desc: '停用指定的订阅计划', auth: true,
+        params: [
+          { name: 'plan_id', label: '计划 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+    ]
+  },
+  {
+    group: '订阅 (Subscriptions)',
+    items: [
+      {
+        id: 'create_subscription', method: 'POST', path: '/v1/subscriptions', name: '创建订阅',
+        desc: '创建新订阅，返回 Checkout URL', auth: true,
+        params: [
+          { name: 'external_user_id', label: '用户标识', type: 'string', required: true, place: 'body' },
+          { name: 'plan_id', label: '计划 ID', type: 'uuid', required: true, place: 'body' },
+          { name: 'email', label: '用户邮箱', type: 'string', required: false, place: 'body' },
+          { name: 'success_url', label: '成功跳转 URL', type: 'string', required: true, place: 'body', placeholder: 'https://example.com/success' },
+          { name: 'cancel_url', label: '取消跳转 URL', type: 'string', required: true, place: 'body', placeholder: 'https://example.com/cancel' },
+          { name: 'notify_url', label: '回调地址', type: 'string', required: false, place: 'body' },
+          { name: 'trial_period_days', label: '试用期天数', type: 'integer', required: false, place: 'body' },
+          { name: 'metadata', label: '元数据 (JSON)', type: 'json', required: false, place: 'body' },
+        ]
+      },
+      {
+        id: 'list_subscriptions', method: 'GET', path: '/v1/subscriptions', name: '订阅列表',
+        desc: '查询订阅列表', auth: true,
+        params: [
+          { name: 'page', label: '页码', type: 'integer', required: false, place: 'query', default: '1' },
+          { name: 'page_size', label: '每页数量', type: 'integer', required: false, place: 'query', default: '20' },
+        ]
+      },
+      {
+        id: 'get_subscription_by_user', method: 'GET', path: '/v1/subscriptions/user/{external_user_id}', name: '按用户查询订阅',
+        desc: '根据用户标识查询订阅', auth: true,
+        params: [
+          { name: 'external_user_id', label: '用户标识', type: 'string', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'get_subscription', method: 'GET', path: '/v1/subscriptions/{subscription_id}', name: '订阅详情',
+        desc: '根据订阅 ID 查询详情', auth: true,
+        params: [
+          { name: 'subscription_id', label: '订阅 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'cancel_subscription', method: 'POST', path: '/v1/subscriptions/{subscription_id}/cancel', name: '取消订阅',
+        desc: '取消订阅 (可选立即或到期后取消)', auth: true,
+        params: [
+          { name: 'subscription_id', label: '订阅 ID', type: 'uuid', required: true, place: 'path' },
+          { name: 'immediate', label: '立即取消', type: 'boolean', required: false, place: 'body', default: 'false' },
+        ]
+      },
+      {
+        id: 'resume_subscription', method: 'POST', path: '/v1/subscriptions/{subscription_id}/resume', name: '恢复订阅',
+        desc: '恢复已取消的订阅', auth: true,
+        params: [
+          { name: 'subscription_id', label: '订阅 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'pause_subscription', method: 'POST', path: '/v1/subscriptions/{subscription_id}/pause', name: '暂停订阅',
+        desc: '暂停活跃的订阅', auth: true,
+        params: [
+          { name: 'subscription_id', label: '订阅 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'unpause_subscription', method: 'POST', path: '/v1/subscriptions/{subscription_id}/unpause', name: '恢复暂停的订阅',
+        desc: '恢复暂停状态的订阅', auth: true,
+        params: [
+          { name: 'subscription_id', label: '订阅 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+      {
+        id: 'change_plan', method: 'POST', path: '/v1/subscriptions/{subscription_id}/change-plan', name: '变更计划',
+        desc: '变更订阅的计划 (升降级)', auth: true,
+        params: [
+          { name: 'subscription_id', label: '订阅 ID', type: 'uuid', required: true, place: 'path' },
+          { name: 'new_plan_id', label: '新计划 ID', type: 'uuid', required: true, place: 'body' },
+          { name: 'proration_mode', label: '按比例计费模式', type: 'enum', required: false, place: 'body', options: ['', 'auto', 'custom'] },
+          { name: 'credit_amount', label: '抵扣金额', type: 'integer', required: false, place: 'body' },
+        ]
+      },
+      {
+        id: 'cancel_pending_change', method: 'POST', path: '/v1/subscriptions/{subscription_id}/cancel-pending-change', name: '取消待变更',
+        desc: '取消计划变更 (降级预约)', auth: true,
+        params: [
+          { name: 'subscription_id', label: '订阅 ID', type: 'uuid', required: true, place: 'path' },
+        ]
+      },
+    ]
+  },
+];
+
+let currentEndpoint = null;
+let lastResponseText = '';
+
+function initBaseUrl() {
+  const el = document.getElementById('baseUrl');
+  el.value = window.location.origin;
+}
+
+function renderSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  let html = '';
+  ENDPOINTS.forEach(group => {
+    html += `<div class="sidebar-group">`;
+    html += `<div class="sidebar-group-title" onclick="this.parentElement.classList.toggle('collapsed')">${group.group}</div>`;
+    html += `<div class="sidebar-items">`;
+    group.items.forEach(item => {
+      html += `<div class="sidebar-item" data-id="${item.id}" onclick="selectEndpoint('${item.id}')">`;
+      html += `<span class="method-tag ${item.method}">${item.method}</span>`;
+      html += `<span class="path" title="${item.path}">${item.name}</span>`;
+      html += `</div>`;
+    });
+    html += `</div></div>`;
+  });
+  sidebar.innerHTML = html;
+}
+
+function findEndpoint(id) {
+  for (const group of ENDPOINTS) {
+    for (const item of group.items) {
+      if (item.id === id) return item;
+    }
+  }
+  return null;
+}
+
+function selectEndpoint(id) {
+  currentEndpoint = findEndpoint(id);
+  if (!currentEndpoint) return;
+
+  document.querySelectorAll('.sidebar-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === id);
+  });
+
+  const header = document.getElementById('contentHeader');
+  const methodClass = currentEndpoint.method;
+  document.getElementById('endpointTitle').innerHTML =
+    `<span class="method-tag ${methodClass}">${currentEndpoint.method}</span> ${currentEndpoint.name}` +
+    (currentEndpoint.auth ? ' <span style="font-size:11px;color:var(--orange);font-weight:400">🔒 需要 API Key</span>' : '');
+  document.getElementById('endpointDesc').textContent =
+    `${currentEndpoint.path}  —  ${currentEndpoint.desc}`;
+
+  renderForm(currentEndpoint);
+}
+
+function renderForm(ep) {
+  const panel = document.getElementById('requestPanel');
+  if (ep.params.length === 0) {
+    panel.innerHTML = `
+      <div style="color:var(--text-dim);font-size:13px;margin-bottom:16px">此接口无需参数</div>
+      <button class="send-btn" id="sendBtn" onclick="sendRequest()">发送请求</button>
+    `;
+    return;
+  }
+
+  const pathParams = ep.params.filter(p => p.place === 'path');
+  const queryParams = ep.params.filter(p => p.place === 'query');
+  const bodyParams = ep.params.filter(p => p.place === 'body');
+
+  let html = '';
+
+  if (pathParams.length > 0) {
+    html += `<div class="form-section"><div class="form-section-title">路径参数 (Path)</div>`;
+    pathParams.forEach(p => { html += renderField(p); });
+    html += `</div>`;
+  }
+
+  if (queryParams.length > 0) {
+    html += `<div class="form-section"><div class="form-section-title">查询参数 (Query)</div>`;
+    queryParams.forEach(p => { html += renderField(p); });
+    html += `</div>`;
+  }
+
+  if (bodyParams.length > 0) {
+    html += `<div class="form-section"><div class="form-section-title">请求体 (Body)</div>`;
+    bodyParams.forEach(p => { html += renderField(p); });
+    html += `</div>`;
+  }
+
+  html += `<button class="send-btn" id="sendBtn" onclick="sendRequest()">发送请求</button>`;
+  panel.innerHTML = html;
+}
+
+function renderField(p) {
+  const req = p.required ? '<span class="required">*</span>' : '';
+  const typeHint = p.type === 'json' ? 'JSON Object' : p.type;
+  let inputHtml = '';
+
+  if (p.type === 'enum') {
+    const opts = (p.options || []).map(o =>
+      `<option value="${o}">${o || '(不选)'}</option>`
+    ).join('');
+    inputHtml = `<select id="field_${p.name}">${opts}</select>`;
+  } else if (p.type === 'boolean') {
+    const defVal = p.default || 'false';
+    inputHtml = `<select id="field_${p.name}">
+      ${p.required ? '' : '<option value="">(不选)</option>'}
+      <option value="true" ${defVal==='true'?'selected':''}>true</option>
+      <option value="false" ${defVal==='false'?'selected':''}>false</option>
+    </select>`;
+  } else if (p.type === 'json') {
+    inputHtml = `<textarea id="field_${p.name}" placeholder="${p.placeholder || ''}">${p.default || ''}</textarea>`;
+  } else {
+    const ph = p.placeholder || (p.type === 'uuid' ? 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' : '');
+    const val = p.default || '';
+    inputHtml = `<input type="text" id="field_${p.name}" placeholder="${ph}" value="${val}">`;
+  }
+
+  return `<div class="form-row">
+    <label>${p.label}${req}<span class="type-hint">${typeHint}</span></label>
+    ${inputHtml}
+  </div>`;
+}
+
+function getFieldValue(name) {
+  const el = document.getElementById('field_' + name);
+  if (!el) return undefined;
+  return el.value.trim();
+}
+
+async function sendRequest() {
+  if (!currentEndpoint) return;
+  const ep = currentEndpoint;
+  const baseUrl = document.getElementById('baseUrl').value.replace(/\/+$/, '');
+  const apiKey = document.getElementById('apiKey').value.trim();
+
+  if (ep.auth && !apiKey) {
+    showResponse(null, 0, { error: '此接口需要 API Key，请在顶部输入' }, 0);
+    return;
+  }
+
+  let path = ep.path;
+  const queryParts = [];
+  const bodyObj = {};
+  let hasBody = false;
+
+  for (const p of ep.params) {
+    const val = getFieldValue(p.name);
+
+    if (p.required && (val === '' || val === undefined)) {
+      showResponse(null, 0, { error: `必填参数 "${p.label}" 不能为空` }, 0);
+      return;
+    }
+
+    if (val === '' || val === undefined) continue;
+
+    if (p.place === 'path') {
+      path = path.replace(`{${p.name}}`, encodeURIComponent(val));
+    } else if (p.place === 'query') {
+      queryParts.push(`${p.name}=${encodeURIComponent(val)}`);
+    } else if (p.place === 'body') {
+      hasBody = true;
+      if (p.type === 'integer') {
+        bodyObj[p.name] = parseInt(val, 10);
+      } else if (p.type === 'boolean') {
+        bodyObj[p.name] = val === 'true';
+      } else if (p.type === 'json') {
+        try {
+          bodyObj[p.name] = JSON.parse(val);
+        } catch {
+          showResponse(null, 0, { error: `参数 "${p.label}" 不是合法的 JSON` }, 0);
+          return;
+        }
+      } else if (p.type === 'uuid') {
+        bodyObj[p.name] = val;
+      } else {
+        bodyObj[p.name] = val;
+      }
+    }
+  }
+
+  let url = baseUrl + path;
+  if (queryParts.length > 0) url += '?' + queryParts.join('&');
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (ep.auth && apiKey) {
+    headers['Authorization'] = `Bearer ${apiKey}`;
+  }
+
+  const fetchOpts = { method: ep.method, headers };
+  if (hasBody && (ep.method === 'POST' || ep.method === 'PUT' || ep.method === 'PATCH')) {
+    fetchOpts.body = JSON.stringify(bodyObj);
+  }
+
+  const btn = document.getElementById('sendBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '发送中...'; }
+
+  const start = performance.now();
+  try {
+    const resp = await fetch(url, fetchOpts);
+    const elapsed = Math.round(performance.now() - start);
+    let data;
+    const contentType = resp.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      data = await resp.json();
+    } else {
+      data = await resp.text();
+    }
+    showResponse(resp.status, elapsed, data);
+  } catch (err) {
+    const elapsed = Math.round(performance.now() - start);
+    showResponse(0, elapsed, { error: '请求失败: ' + err.message });
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '发送请求'; }
+  }
+}
+
+function showResponse(status, elapsed, data) {
+  const badge = document.getElementById('statusBadge');
+  const timeEl = document.getElementById('responseTime');
+  const bodyEl = document.getElementById('responseBody');
+  const copyBtn = document.getElementById('copyBtn');
+
+  if (status !== null) {
+    badge.style.display = '';
+    badge.textContent = `${status}`;
+    badge.className = 'status-badge ' + (
+      status >= 200 && status < 300 ? 's2xx' :
+      status >= 400 && status < 500 ? 's4xx' : 's5xx'
+    );
+    if (status === 0) {
+      badge.textContent = 'ERR';
+      badge.className = 'status-badge s5xx';
+    }
+  } else {
+    badge.style.display = 'none';
+  }
+
+  timeEl.textContent = elapsed > 0 ? `${elapsed}ms` : '';
+  copyBtn.style.display = '';
+
+  if (typeof data === 'string') {
+    lastResponseText = data;
+    bodyEl.innerHTML = `<pre>${escapeHtml(data)}</pre>`;
+  } else {
+    lastResponseText = JSON.stringify(data, null, 2);
+    bodyEl.innerHTML = `<pre>${syntaxHighlight(data)}</pre>`;
+  }
+}
+
+function syntaxHighlight(obj) {
+  const json = JSON.stringify(obj, null, 2);
+  return json.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    match => {
+      let cls = 'json-number';
+      if (/^"/.test(match)) {
+        cls = /:$/.test(match) ? 'json-key' : 'json-string';
+      } else if (/true|false/.test(match)) {
+        cls = 'json-bool';
+      } else if (/null/.test(match)) {
+        cls = 'json-null';
+      }
+      return `<span class="${cls}">${escapeHtml(match)}</span>`;
+    }
+  );
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function copyResponse() {
+  if (!lastResponseText) return;
+  navigator.clipboard.writeText(lastResponseText).then(() => {
+    const btn = document.getElementById('copyBtn');
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = '复制'; }, 1500);
+  });
+}
+
+async function checkHealth() {
+  const baseUrl = document.getElementById('baseUrl').value.replace(/\/+$/, '');
+  const dot = document.getElementById('statusDot');
+  try {
+    const resp = await fetch(baseUrl + '/health');
+    if (resp.ok) {
+      const data = await resp.json();
+      dot.className = 'status-dot ' + (data?.data?.status === 'ok' ? 'ok' : 'err');
+    } else {
+      dot.className = 'status-dot err';
+    }
+  } catch {
+    dot.className = 'status-dot err';
+  }
+}
+
+initBaseUrl();
+renderSidebar();
+checkHealth();
+</script>
+</body>
+</html>

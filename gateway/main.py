@@ -8,10 +8,14 @@ import structlog
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from pydantic import ValidationError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from gateway.db import close_db, init_db
@@ -83,6 +87,23 @@ def custom_openapi():
 
 
 app.openapi = custom_openapi
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
+@app.get("/test", include_in_schema=False)
+async def api_test_page():
+    html_path = _STATIC_DIR / "api_test.html"
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
 
 # ===== 全局异常处理器 =====
