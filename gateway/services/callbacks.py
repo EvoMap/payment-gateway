@@ -34,6 +34,20 @@ from gateway.core.schemas import CallbackEvent
 logger = structlog.get_logger(__name__)
 
 
+def _get_item_period(event_data: dict) -> tuple[int | None, int | None]:
+    """从 webhook event_data 的 items.data[0] 提取 current_period_start/end。
+
+    新版 Stripe API 已将这两个字段从 Subscription 顶层移至订阅项级别。
+    """
+    items = event_data.get("items", {}).get("data", [])
+    if items:
+        return (
+            items[0].get("current_period_start"),
+            items[0].get("current_period_end"),
+        )
+    return None, None
+
+
 class CallbackService:
     """回调处理服务"""
 
@@ -311,13 +325,14 @@ class CallbackService:
                     subscription.trial_end = datetime.fromtimestamp(
                         event_data["trial_end"], tz=UTC
                     )
-                if event_data.get("current_period_start"):
+                period_start, period_end = _get_item_period(event_data)
+                if period_start:
                     subscription.current_period_start = datetime.fromtimestamp(
-                        event_data["current_period_start"], tz=UTC
+                        period_start, tz=UTC
                     )
-                if event_data.get("current_period_end"):
+                if period_end:
                     subscription.current_period_end = datetime.fromtimestamp(
-                        event_data["current_period_end"], tz=UTC
+                        period_end, tz=UTC
                     )
 
             case "subscription_pending":
@@ -354,17 +369,14 @@ class CallbackService:
                                     UTC
                                 ).isoformat(),
                             }
-                period = (
-                    event_data.get("current_period_start"),
-                    event_data.get("current_period_end"),
-                )
-                if period[0]:
+                period_start, period_end = _get_item_period(event_data)
+                if period_start:
                     subscription.current_period_start = datetime.fromtimestamp(
-                        period[0], tz=UTC
+                        period_start, tz=UTC
                     )
-                if period[1]:
+                if period_end:
                     subscription.current_period_end = datetime.fromtimestamp(
-                        period[1], tz=UTC
+                        period_end, tz=UTC
                     )
                 subscription.cancel_at_period_end = event_data.get(
                     "cancel_at_period_end", False

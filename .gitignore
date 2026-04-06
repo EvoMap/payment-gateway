@@ -60,6 +60,6 @@ run.py
 # Resources
 *.example
 !env.example
-*.yml
+*.html
 *.ini
 *.md

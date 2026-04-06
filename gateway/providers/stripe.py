@@ -12,7 +12,12 @@ import stripe
 from gateway.core.logging import get_logger
 from gateway.core.constants import Provider, EventCategory
 from gateway.core.settings import get_settings
-from gateway.core.exceptions import IgnoredException
+from gateway.core.exceptions import (
+    IgnoredException,
+    BadRequestException,
+    NotFoundException,
+    PaymentProviderException,
+)
 from gateway.core.schemas import PaymentTypeEnum, CallbackEvent
 from .base import (
     ProviderAdapter,
@@ -25,6 +30,30 @@ from .base import (
 
 settings = get_settings()
 logger = get_logger()
+
+
+def _handle_stripe_sub_error(e: stripe.InvalidRequestError) -> None:
+    """将 Stripe InvalidRequestError 转为业务异常。"""
+    msg = str(e)
+    if "No such subscription" in msg:
+        raise NotFoundException(message="订阅在 Stripe 中不存在", code=4041)
+    if "canceled subscription" in msg.lower():
+        raise BadRequestException(message="订阅已取消，无法执行此操作", code=4018)
+    raise PaymentProviderException(message=f"Stripe 请求失败: {msg}", code=5021)
+
+
+def _get_sub_period_end(sub) -> int | None:
+    """从 Subscription 的 items 中提取 current_period_end。
+
+    新版 Stripe API 已将 current_period_end 从 Subscription 顶层
+    移至 items.data[].current_period_end（订阅项级别）。
+    """
+    try:
+        if sub.items and sub.items.data:
+            return sub.items.data[0].current_period_end
+    except (AttributeError, IndexError):
+        pass
+    return None
 
 
 class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
@@ -403,18 +432,22 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
         *,
         immediate: bool = False,
     ) -> SubscriptionActionResult:
-        if immediate:
-            sub = await stripe.Subscription.cancel_async(subscription_id)
-        else:
-            sub = await stripe.Subscription.modify_async(
-                subscription_id, cancel_at_period_end=True
-            )
+        try:
+            if immediate:
+                sub = await stripe.Subscription.cancel_async(subscription_id)
+            else:
+                sub = await stripe.Subscription.modify_async(
+                    subscription_id, cancel_at_period_end=True
+                )
+        except stripe.InvalidRequestError as e:
+            _handle_stripe_sub_error(e)
+        period_end = _get_sub_period_end(sub)
         return SubscriptionActionResult(
             subscription_id=sub.id,
             status=sub.status,
             current_period_end=(
-                datetime.fromtimestamp(sub.current_period_end, tz=UTC)
-                if sub.current_period_end
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
                 else None
             ),
             cancel_at_period_end=sub.cancel_at_period_end,
@@ -423,15 +456,19 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
     async def resume_subscription(
         self, subscription_id: str
     ) -> SubscriptionActionResult:
-        sub = await stripe.Subscription.modify_async(
-            subscription_id, cancel_at_period_end=False
-        )
+        try:
+            sub = await stripe.Subscription.modify_async(
+                subscription_id, cancel_at_period_end=False
+            )
+        except stripe.InvalidRequestError as e:
+            _handle_stripe_sub_error(e)
+        period_end = _get_sub_period_end(sub)
         return SubscriptionActionResult(
             subscription_id=sub.id,
             status=sub.status,
             current_period_end=(
-                datetime.fromtimestamp(sub.current_period_end, tz=UTC)
-                if sub.current_period_end
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
                 else None
             ),
             cancel_at_period_end=False,
@@ -440,16 +477,20 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
     async def pause_subscription(
         self, subscription_id: str
     ) -> SubscriptionActionResult:
-        sub = await stripe.Subscription.modify_async(
-            subscription_id,
-            pause_collection={"behavior": "void"},
-        )
+        try:
+            sub = await stripe.Subscription.modify_async(
+                subscription_id,
+                pause_collection={"behavior": "void"},
+            )
+        except stripe.InvalidRequestError as e:
+            _handle_stripe_sub_error(e)
+        period_end = _get_sub_period_end(sub)
         return SubscriptionActionResult(
             subscription_id=sub.id,
             status=sub.status,
             current_period_end=(
-                datetime.fromtimestamp(sub.current_period_end, tz=UTC)
-                if sub.current_period_end
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
                 else None
             ),
             cancel_at_period_end=sub.cancel_at_period_end,
@@ -458,16 +499,20 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
     async def unpause_subscription(
         self, subscription_id: str
     ) -> SubscriptionActionResult:
-        sub = await stripe.Subscription.modify_async(
-            subscription_id,
-            pause_collection="",
-        )
+        try:
+            sub = await stripe.Subscription.modify_async(
+                subscription_id,
+                pause_collection="",
+            )
+        except stripe.InvalidRequestError as e:
+            _handle_stripe_sub_error(e)
+        period_end = _get_sub_period_end(sub)
         return SubscriptionActionResult(
             subscription_id=sub.id,
             status=sub.status,
             current_period_end=(
-                datetime.fromtimestamp(sub.current_period_end, tz=UTC)
-                if sub.current_period_end
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
                 else None
             ),
             cancel_at_period_end=sub.cancel_at_period_end,
@@ -514,12 +559,13 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
                 subscription_id, **modify_params
             )
 
+            period_end = _get_sub_period_end(sub)
             return SubscriptionActionResult(
                 subscription_id=sub.id,
                 status=sub.status,
                 current_period_end=(
-                    datetime.fromtimestamp(sub.current_period_end, tz=UTC)
-                    if sub.current_period_end
+                    datetime.fromtimestamp(period_end, tz=UTC)
+                    if period_end
                     else None
                 ),
                 cancel_at_period_end=sub.cancel_at_period_end,

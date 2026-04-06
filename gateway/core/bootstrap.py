@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import inspect, text
-from sqlalchemy.schema import CreateIndex
+from sqlalchemy.schema import CreateIndex, CreateColumn
 
 from gateway.db import get_database_url
 from gateway.core.settings import get_settings
@@ -15,30 +15,51 @@ _INDEX_MIGRATIONS = [
 ]
 
 
-async def _migrate_indexes(engine) -> None:
-    """检查并迁移已变更的索引（无 Alembic 环境下的轻量方案）
+async def _migrate_schema(engine) -> None:
+    """轻量级 schema 迁移（无 Alembic 环境）
 
-    注意：create_all(checkfirst=True) 对已存在的表会跳过所有 DDL，
-    因此必须在此处显式创建缺失的新索引。
+    1. 为已存在的表补建模型中新增的列
+    2. 删除已变更的旧索引
+    3. 补建缺失的新索引
     """
     from gateway.core.models import Base
 
     async with engine.begin() as conn:
         def _do_migrate(connection):
             inspector = inspect(connection)
+            existing_tables = set(inspector.get_table_names())
+
+            # --- 补建缺失的列 ---
+            for table_name, table_obj in Base.metadata.tables.items():
+                if table_name not in existing_tables:
+                    continue
+                existing_cols = {
+                    c["name"] for c in inspector.get_columns(table_name)
+                }
+                for col in table_obj.columns:
+                    if col.name not in existing_cols:
+                        col_ddl = CreateColumn(col).compile(
+                            dialect=connection.dialect
+                        )
+                        connection.execute(text(
+                            f'ALTER TABLE "{table_name}" ADD COLUMN {col_ddl}'
+                        ))
+                        print(f"🆕 已补建列 {table_name}.{col.name}")
+
+            # --- 删除旧索引 ---
             for migration in _INDEX_MIGRATIONS:
                 table = migration["table"]
                 old_name = migration["old"]
-                if table not in inspector.get_table_names():
+                if table not in existing_tables:
                     continue
                 existing = {idx["name"] for idx in inspector.get_indexes(table)}
                 if old_name in existing:
                     connection.execute(text(f'DROP INDEX IF EXISTS "{old_name}"'))
                     print(f"🔄 已删除旧索引 {old_name}")
 
-            # 对所有已存在的表，补建模型中定义但数据库中缺失的索引
+            # --- 补建缺失的索引 ---
             for table_name, table_obj in Base.metadata.tables.items():
-                if table_name not in inspector.get_table_names():
+                if table_name not in existing_tables:
                     continue
                 existing = {idx["name"] for idx in inspector.get_indexes(table_name)}
                 for idx in table_obj.indexes:
@@ -86,8 +107,8 @@ async def reset_tables() -> None:
 
         # 外层 conn 已释放，后续操作各自独立拿连接
         if tables_exist:
-            print("✅ 数据库表已存在，检查索引迁移...")
-            await _migrate_indexes(engine)
+            print("✅ 数据库表已存在，检查 schema 迁移...")
+            await _migrate_schema(engine)
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
         else:
