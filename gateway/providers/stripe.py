@@ -49,8 +49,8 @@ def _get_sub_period_end(sub) -> int | None:
     移至 items.data[].current_period_end（订阅项级别）。
     """
     try:
-        if sub.items and sub.items.data:
-            return sub.items.data[0].current_period_end
+        if sub["items"] and sub["items"]["data"]:
+            return sub["items"]["data"][0].current_period_end
     except (AttributeError, IndexError):
         pass
     return None
@@ -529,9 +529,9 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
         customer_id: str | None = None,
     ) -> SubscriptionActionResult:
         current_sub = await stripe.Subscription.retrieve_async(subscription_id)
-        if not current_sub.items.data:
+        if not current_sub["items"]["data"]:
             raise ValueError(f"订阅 {subscription_id} 无 items，无法变更")
-        current_item_id = current_sub.items.data[0].id
+        current_item_id = current_sub["items"]["data"][0].id
 
         credit_invoice_item = None
 
@@ -593,7 +593,7 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
         )
 
         current_phase = schedule.phases[0]
-        current_items = [{"price": item.price} for item in current_phase.items]
+        current_items = [{"price": item["price"]} for item in current_phase["items"]]
 
         await stripe.SubscriptionSchedule.modify_async(
             schedule.id,
