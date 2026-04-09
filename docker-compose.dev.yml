@@ -85,6 +85,7 @@ services:
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-5}
       WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-10}
       WORKER_MAX_RETRIES: ${WORKER_MAX_RETRIES:-10}
+      WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-}
     depends_on:
       db:
         condition: service_started

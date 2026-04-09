@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     subscription_incomplete_cleanup_minutes: int = Field(default=120, ge=60, le=2880)
     subscription_cleanup_interval: int = Field(default=300, ge=60)
 
+    # Webhook HMAC 签名密钥 (用于对外投递 webhook 进行签名)
+    webhook_signing_secret: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -7,6 +7,9 @@ import asyncio
 import random
 from datetime import datetime, timedelta, UTC
 
+import hashlib
+import hmac
+
 import httpx
 import structlog
 from sqlalchemy import select, and_, or_
@@ -194,10 +197,20 @@ class WebhookDeliveryWorker:
         )
 
         try:
+            import json as _json
+            body_bytes = _json.dumps(delivery.payload, ensure_ascii=False).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if settings.webhook_signing_secret:
+                sig = hmac.new(
+                    settings.webhook_signing_secret.encode("utf-8"),
+                    body_bytes,
+                    hashlib.sha256,
+                ).hexdigest()
+                headers["X-Webhook-Signature"] = sig
             response = await self.http_client.post(
                 delivery.notify_url,
-                json=delivery.payload,
-                headers={"Content-Type": "application/json"},
+                content=body_bytes,
+                headers=headers,
             )
 
             delivery.last_http_status = response.status_code
