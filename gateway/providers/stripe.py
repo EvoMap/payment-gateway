@@ -533,53 +533,25 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
             raise ValueError(f"订阅 {subscription_id} 无 items，无法变更")
         current_item_id = current_sub["items"]["data"][0].id
 
-        credit_invoice_item = None
+        modify_params = {
+            "items": [{"id": current_item_id, "price": new_price_id}],
+            "proration_behavior": "always_invoice",
+        }
+        sub = await stripe.Subscription.modify_async(
+            subscription_id, **modify_params
+        )
 
-        try:
-            if proration_mode == "custom":
-                if not credit_amount or not currency or not customer_id:
-                    raise ValueError(
-                        "custom 模式必须提供 credit_amount、currency、customer_id"
-                    )
-                credit_invoice_item = await stripe.InvoiceItem.create_async(
-                    customer=customer_id,
-                    amount=-abs(credit_amount),
-                    currency=currency.lower(),
-                    subscription=subscription_id,
-                    description="Plan change credit (custom proration)",
-                )
-
-            modify_params = {
-                "items": [{"id": current_item_id, "price": new_price_id}],
-                "proration_behavior": (
-                    "create_prorations" if proration_mode == "auto" else "none"
-                ),
-            }
-            sub = await stripe.Subscription.modify_async(
-                subscription_id, **modify_params
-            )
-
-            period_end = _get_sub_period_end(sub)
-            return SubscriptionActionResult(
-                subscription_id=sub.id,
-                status=sub.status,
-                current_period_end=(
-                    datetime.fromtimestamp(period_end, tz=UTC)
-                    if period_end
-                    else None
-                ),
-                cancel_at_period_end=sub.cancel_at_period_end,
-            )
-
-        except stripe.StripeError:
-            if credit_invoice_item:
-                try:
-                    await stripe.InvoiceItem.delete_async(credit_invoice_item.id)
-                except stripe.StripeError as cleanup_err:
-                    logger.warning(
-                        f"清理抵扣 InvoiceItem 失败: {cleanup_err}",
-                    )
-            raise
+        period_end = _get_sub_period_end(sub)
+        return SubscriptionActionResult(
+            subscription_id=sub.id,
+            status=sub.status,
+            current_period_end=(
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
+                else None
+            ),
+            cancel_at_period_end=sub.cancel_at_period_end,
+        )
 
     async def schedule_subscription_downgrade(
         self,
