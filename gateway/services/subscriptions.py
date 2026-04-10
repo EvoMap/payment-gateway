@@ -277,6 +277,26 @@ class SubscriptionService:
         subscription = await self.get_subscription(app_id, subscription_id)
         log = logger.bind(subscription_id=str(subscription_id))
 
+        # Handle incomplete subscriptions: expire the checkout session
+        if subscription.status == SubscriptionStatus.incomplete.value:
+            if subscription.provider_checkout_session_id:
+                adapter = get_adapter(subscription.provider)
+                try:
+                    await adapter.cancel_payment(
+                        merchant_order_no=str(subscription_id),
+                        provider_txn_id=subscription.provider_checkout_session_id,
+                    )
+                    log.info("incomplete_checkout_session_expired")
+                except Exception as e:
+                    log.warning("incomplete_checkout_expire_failed", error=str(e))
+
+            subscription.status = SubscriptionStatus.incomplete_expired.value
+            subscription.canceled_at = datetime.now(UTC)
+            subscription.ended_at = datetime.now(UTC)
+            await self.session.flush()
+            log.info("incomplete_subscription_expired")
+            return subscription
+
         allowed_statuses = {
             SubscriptionStatus.active.value,
             SubscriptionStatus.trialing.value,
