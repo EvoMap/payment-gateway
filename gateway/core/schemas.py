@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from gateway.core.constants import (
     Provider,
@@ -101,8 +101,7 @@ class PaymentResponse(BaseModel):
     updated_at: datetime
     paid_at: datetime | None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ===== 取消支付 =====
@@ -162,8 +161,7 @@ class WebhookDeliveryResponse(BaseModel):
     delivered_at: datetime | None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ===== 应用管理 =====
@@ -189,8 +187,7 @@ class AppResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AppListResponse(BaseModel):
@@ -231,8 +228,7 @@ class RefundResponse(BaseModel):
     updated_at: datetime
     refunded_at: datetime | None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class RefundListResponse(BaseModel):
@@ -281,8 +277,7 @@ class PlanResponse(BaseModel):
     is_active: bool
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PlanListResponse(BaseModel):
@@ -327,8 +322,7 @@ class SubscriptionResponse(BaseModel):
     trial_end: datetime | None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SubscriptionListResponse(BaseModel):
