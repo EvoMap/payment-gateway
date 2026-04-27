@@ -25,9 +25,24 @@ x-common-env: &common-env
   SUBSCRIPTION_CLEANUP_INTERVAL: ${SUBSCRIPTION_CLEANUP_INTERVAL:-300}
 
 services:
+  # PostgreSQL 数据库
+  db:
+    image: postgres:16-alpine
+    container_name: payment-gateway-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-gateway}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dev_password}
+      POSTGRES_DB: ${DB_NAME:-gateway}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
   # FastAPI 服务（API 入口）
   api:
-    image: harbor.autogame.ai/backend/payment-gateway:${IMAGE_TAG:-latest}
+    build: .
+    image: payment-gateway:dev
     container_name: payment-gateway-api
     ports:
       - "${API_PORT:-8000}:8000"
@@ -37,17 +52,14 @@ services:
       <<: *common-env
       DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read(); sys.exit(0)"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-      start_period: 20s
+    depends_on:
+      db:
+        condition: service_started
     restart: unless-stopped
 
   # WebhookDelivery Worker（异步投递与重试）
   worker:
-    image: harbor.autogame.ai/backend/payment-gateway:${IMAGE_TAG:-latest}
+    image: payment-gateway:dev
     container_name: payment-gateway-worker
     command: ["python", "-m", "gateway.worker"]
     env_file:
@@ -62,6 +74,11 @@ services:
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
       WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-}
     depends_on:
+      db:
+        condition: service_started
       api:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
+
+volumes:
+  pgdata:
