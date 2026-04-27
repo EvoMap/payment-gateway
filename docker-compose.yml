@@ -1,7 +1,7 @@
 x-common-env: &common-env
   # 数据库配置
   DATABASE_URL: ${DATABASE_URL:-}
-  DB_HOST: ${DB_HOST:-db}
+  DB_HOST: ${DB_HOST:-localhost}
   DB_PORT: ${DB_PORT:-5432}
   DB_USER: ${DB_USER:-gateway}
   DB_PASSWORD: ${DB_PASSWORD:-dev_password}
@@ -44,9 +44,6 @@ services:
       timeout: 3s
       retries: 10
       start_period: 20s
-    depends_on:
-      db:
-        condition: service_started
     restart: unless-stopped
 
   # WebhookDelivery Worker（异步投递与重试）
@@ -69,6 +66,3 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  pgdata:
