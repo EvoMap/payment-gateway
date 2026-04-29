@@ -1,25 +1,64 @@
 """
-Stripe Provider Adapter
+Stripe Provider Adapter（支付 + 订阅）
 """
 
 import time
-import stripe
+import uuid
 import traceback
+from datetime import datetime, UTC
+
+import httpx
+import stripe
 
 from gateway.core.logging import get_logger
-from gateway.core.constants import Provider
+from gateway.core.constants import Provider, EventCategory
 from gateway.core.settings import get_settings
-from gateway.core.exceptions import IgnoredException
+from gateway.core.exceptions import (
+    IgnoredException,
+    BadRequestException,
+    NotFoundException,
+    PaymentProviderException,
+)
 from gateway.core.schemas import PaymentTypeEnum, CallbackEvent
-from .base import ProviderAdapter, ProviderPaymentResult, PaymentFlowType
-
+from .base import (
+    ProviderAdapter,
+    ProviderPaymentResult,
+    PaymentFlowType,
+    SubscriptionProviderMixin,
+    SubscriptionCheckoutResult,
+    SubscriptionActionResult,
+)
 
 settings = get_settings()
 logger = get_logger()
 
 
-class StripeAdapter(ProviderAdapter):
-    """Stripe 支付适配器"""
+def _handle_stripe_sub_error(e: stripe.InvalidRequestError) -> None:
+    """将 Stripe InvalidRequestError 转为业务异常。"""
+    msg = str(e)
+    if "No such subscription" in msg:
+        raise NotFoundException(message="订阅在 Stripe 中不存在", code=4041)
+    if "canceled subscription" in msg.lower():
+        raise BadRequestException(message="订阅已取消，无法执行此操作", code=4018)
+    raise PaymentProviderException(message=f"Stripe 请求失败: {msg}", code=5021)
+
+
+def _get_sub_period_end(sub) -> int | None:
+    """从 Subscription 的 items 中提取 current_period_end。
+
+    新版 Stripe API 已将 current_period_end 从 Subscription 顶层
+    移至 items.data[].current_period_end（订阅项级别）。
+    """
+    try:
+        if sub["items"] and sub["items"]["data"]:
+            return sub["items"]["data"][0].current_period_end
+    except (AttributeError, IndexError):
+        pass
+    return None
+
+
+class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
+    """Stripe 支付 + 订阅适配器"""
 
     _instance = None
     _initialized = False
@@ -30,24 +69,25 @@ class StripeAdapter(ProviderAdapter):
         return cls._instance
 
     def __init__(self):
-        # 避免重复初始化
         if self._initialized:
             return
 
-        # 从配置中获取参数
         self.secret_key = settings.stripe_secret_key
         self.webhook_secret = settings.stripe_webhook_secret
 
-        # 验证必需配置
         if not self.secret_key:
             raise ValueError(
-                "Stripe 配置不完整。请设置以下环境变量：\n"
-                "- STRIPE_SECRET_KEY\n"
-                "- STRIPE_WEBHOOK_SECRET（用于回调验证）"
+                "Stripe 配置不完整。请设置：STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET"
             )
 
         stripe.api_key = self.secret_key
-
+        stripe.max_network_retries = 1
+        try:
+            stripe.default_http_client = stripe.HTTPXClient(
+                timeout=httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+            )
+        except Exception as e:
+            logger.warning("stripe_http_client_config_failed", error=str(e))
         StripeAdapter._initialized = True
 
     @property
@@ -56,8 +96,9 @@ class StripeAdapter(ProviderAdapter):
 
     @property
     def supported_flows(self) -> list[PaymentFlowType]:
-        """Stripe 仅支持 Checkout 托管支付流程"""
         return [PaymentFlowType.HOSTED]
+
+    # ==================== 支付方法 ====================
 
     async def create_payment(
         self,
@@ -72,54 +113,18 @@ class StripeAdapter(ProviderAdapter):
         product_desc: str | None = None,
         **kwargs,
     ) -> ProviderPaymentResult:
-        """
-        创建 Stripe 托管支付（Checkout Session）
-
-        这是 Stripe 推荐的集成方式，提供：
-        - 完整的支付 UI（无需前端开发）
-        - 自动支持多种支付方式（卡支付、支付宝、微信支付等）
-        - 自动处理 3D Secure 验证
-        - 移动端友好
-
-        Args:
-            currency: 货币代码（如 USD, CNY）
-            merchant_order_no: 商户订单号
-            quantity: 数量
-            notify_url: 回调通知 URL（Stripe 使用 webhook）
-            expire_minutes: 过期时间（Stripe Session 默认 24 小时）
-            unit_amount: 单价（最小货币单位，如分）
-            product_name: 商品名称
-            product_desc: 商品描述
-
-            **kwargs: 额外参数
-                - success_url: 支付成功跳转 URL
-                - cancel_url: 取消支付跳转 URL
-                - metadata: 额外的元数据
-
-        Returns:
-            ProviderPaymentResult: 包含 session_id 和 checkout_url
-
-        参考：https://docs.stripe.com/payments/checkout
-        """
-        # 从 kwargs 中提取可选参数
         success_url = kwargs.get("success_url")
         cancel_url = kwargs.get("cancel_url")
         metadata = kwargs.get("metadata")
-        customer_email = metadata.get("customer_email")
-        payment_method_types = kwargs.get("payment_method_types")  # 手动指定支付方式
+        customer_email = metadata.get("customer_email") if metadata else None
+        payment_method_types = kwargs.get("payment_method_types")
 
-        logger.info(
-            f"开始创建Stripe Checkout Session - 订单号: {merchant_order_no}, "
-            f"单价: {unit_amount}, 数量: {quantity}, 货币: {currency}"
-        )
-
-        # 准备元数据
         session_metadata = {
             "merchant_order_no": merchant_order_no,
+            "app_id": kwargs.get("app_id", ""),
             **(metadata or {}),
         }
 
-        # 构造 Session 参数（基础部分）
         session_data = {
             "mode": "payment",
             "customer_email": customer_email,
@@ -130,47 +135,30 @@ class StripeAdapter(ProviderAdapter):
                         "currency": currency.lower(),
                         "unit_amount": unit_amount,
                         "product_data": {
-                            "name": (product_name or "商品")[:250],  # Stripe 限制
+                            "name": (product_name or "商品")[:250],
                             "description": product_desc[:500] if product_desc else None,
                         },
                     },
                 }
             ],
             "metadata": session_metadata,
-            # 将 metadata 同时传递到 PaymentIntent
             "payment_intent_data": {"metadata": session_metadata},
             "success_url": success_url
             or "https://example.com/success?session_id={CHECKOUT_SESSION_ID}",
             "cancel_url": cancel_url or "https://example.com/cancel",
         }
 
-        # 配置支付方式（默认使用手动指定）
         if payment_method_types:
-            # 用户指定的支付方式
             session_data["payment_method_types"] = payment_method_types
-            logger.info(f"使用指定支付方式: {', '.join(payment_method_types)}")
         else:
-            # 默认支付方式：card（信用卡）
             session_data["payment_method_types"] = ["card"]
-            logger.info("使用默认支付方式: card")
 
-        # 如果指定了过期时间
         if expire_minutes:
-            # Stripe Session 最短 30 分钟，最长 24 小时
             expire_seconds = max(1800, min(expire_minutes * 60, 86400))
             session_data["expires_at"] = int(time.time() + expire_seconds)
 
-        logger.info(f"Stripe 下单参数：{session_data}")
-
         try:
-            session = stripe.checkout.Session.create(**session_data)
-
-            logger.info(
-                f"Stripe Checkout Session 创建成功 - ID: {session.id}, "
-                f"URL: {session.url}, "
-                f"支付方式: {', '.join(session.payment_method_types or [])}"
-            )
-
+            session = await stripe.checkout.Session.create_async(**session_data)
             return ProviderPaymentResult(
                 type=PaymentTypeEnum.url,
                 payload={
@@ -179,21 +167,14 @@ class StripeAdapter(ProviderAdapter):
                 },
                 provider_txn_id=session.id,
             )
-
         except stripe.error.InvalidRequestError as e:
-            # 处理参数错误（如不支持的支付方式）
             error_msg = str(e)
-            logger.error(f"Stripe 请求参数错误：{error_msg}")
-
-            # 如果是支付方式相关错误，尝试回退到只使用 card
             if "payment_method" in error_msg.lower() and session_data.get(
                 "payment_method_types"
             ) != ["card"]:
-                logger.warning("回退为仅使用 card 支付方式")
                 session_data["payment_method_types"] = ["card"]
                 try:
-                    session = stripe.checkout.Session.create(**session_data)
-                    logger.info(f"回退方式创建成功 - ID: {session.id}")
+                    session = await stripe.checkout.Session.create_async(**session_data)
                     return ProviderPaymentResult(
                         type=PaymentTypeEnum.url,
                         payload={
@@ -202,18 +183,11 @@ class StripeAdapter(ProviderAdapter):
                         },
                         provider_txn_id=session.id,
                     )
-                except stripe.StripeError as retry_error:
-                    logger.error(f"回退创建失败: {str(retry_error)}")
-                    traceback.print_exc()
+                except stripe.StripeError:
                     raise
             else:
-                traceback.print_exc()
                 raise
-
-        except stripe.StripeError as e:
-            error_msg = e.user_message if hasattr(e, "user_message") else str(e)
-            logger.error(f"Stripe Checkout Session 创建失败：{error_msg}")
-            traceback.print_exc()
+        except stripe.StripeError:
             raise
 
     async def create_refund(
@@ -224,175 +198,31 @@ class StripeAdapter(ProviderAdapter):
         refund_amount: int | None = None,
         reason: str | None = None,
     ) -> dict:
-        """
-        创建 Stripe 退款
-
-        Args:
-            txn_id: Stripe PaymentIntent ID 或 Checkout Session ID
-            merchant_order_no: 商户订单号
-            refund_amount: 退款金额（货币的最小单位），None 表示全额退款
-            reason: 退款原因，可选值：'duplicate', 'fraudulent', 'requested_by_customer'
-
-        Returns:
-            包含退款信息的字典，包括 refund_id 和 status
-
-        参考：https://docs.stripe.com/api/refunds/create
-        """
         try:
-            # 兼容 Checkout Session ID（cs_），先解析为 PaymentIntent
             payment_intent_id = txn_id
             if txn_id.startswith("cs_"):
-                session = stripe.checkout.Session.retrieve(txn_id)
+                session = await stripe.checkout.Session.retrieve_async(txn_id)
                 payment_intent_id = session.payment_intent
                 if not payment_intent_id:
                     raise ValueError(
                         f"Checkout Session 尚未生成 PaymentIntent，无法退款: {txn_id}"
                     )
 
-            # 构造退款参数
             refund_params = {
                 "payment_intent": payment_intent_id,
                 "metadata": {"merchant_order_no": merchant_order_no},
             }
 
-            # 如果指定了退款金额（部分退款）
             if refund_amount is not None:
                 refund_params["amount"] = refund_amount
-                logger.info(
-                    f"创建部分退款 - PaymentIntent: {payment_intent_id}, 金额: {refund_amount}"
-                )
-            else:
-                logger.info(f"创建全额退款 - PaymentIntent: {payment_intent_id}")
 
-            # 如果提供了退款原因
             if reason:
-                # Stripe 支持的原因类型：duplicate, fraudulent, requested_by_customer
-                # 如果是自定义原因，我们使用 requested_by_customer
                 stripe_reason = "requested_by_customer"
                 if reason in ["duplicate", "fraudulent", "requested_by_customer"]:
                     stripe_reason = reason
                 refund_params["reason"] = stripe_reason
 
-            # 调用 Stripe API 创建退款
-            refund = stripe.Refund.create(**refund_params)
-
-            logger.info(
-                f"退款创建成功 - Refund ID: {refund.id}, "
-                f"状态: {refund.status}, "
-                f"金额: {refund.amount} {refund.currency.upper()}"
-            )
-
-            return {
-                "refund_id": refund.id,
-                "status": refund.status,  # 'succeeded', 'pending', 'failed'
-                "amount": refund.amount,
-                "currency": refund.currency,
-                "payment_intent": refund.payment_intent,
-                "reason": refund.get("reason"),
-                "created": refund.created,
-            }
-
-        except stripe.error.StripeError as e:
-            logger.error(f"Stripe 退款失败 - PaymentIntent: {txn_id}, 错误: {str(e)}")
-            traceback.print_exc()
-            raise ValueError(f"Stripe 退款失败: {str(e)}")
-
-    async def cancel_payment(
-        self,
-        *,
-        merchant_order_no: str,
-        provider_txn_id: str | None = None,
-    ) -> dict:
-        """
-        取消 Stripe Checkout Session（expire）
-
-        注意：只能取消未完成的 Checkout Session
-
-        Args:
-            merchant_order_no: 商户订单号（用于日志或辅助定位）
-            provider_txn_id: Stripe Checkout Session ID（优先）
-
-        Returns:
-            包含取消结果的字典：
-            {
-                "success": True/False,
-                "session_id": "cs_xxx",
-                "status": "expired"
-            }
-
-        参考：https://docs.stripe.com/api/checkout/sessions/expire
-        """
-        try:
-            session_id = provider_txn_id
-
-            # 如果没有提供 session_id，尝试基于 PaymentIntent ID 查找 Session
-            if not session_id and provider_txn_id:
-                sessions = stripe.checkout.Session.list(
-                    payment_intent=provider_txn_id, limit=1
-                )
-                if sessions.data:
-                    session_id = sessions.data[0].id
-
-            if not session_id:
-                raise ValueError(
-                    "Stripe cancel_payment 需要提供 Checkout Session ID，或可通过 PaymentIntent ID 反查"
-                )
-
-            logger.info(
-                f"开始取消 Checkout Session - ID: {session_id}, 订单号: {merchant_order_no}"
-            )
-
-            # 调用 Stripe API 过期 Checkout Session
-            session = stripe.checkout.Session.expire(session_id)
-
-            logger.info(
-                f"Checkout Session 取消操作完成 - ID: {session.id}, "
-                f"状态: {session.status}"
-            )
-
-            return {
-                "success": bool(session.status == "expired"),
-                "session_id": session.id,
-                "status": session.status,  # 应该是 'expired'
-            }
-
-        except stripe.error.InvalidRequestError as e:
-            # Session 已完成或无法取消
-            logger.warning(
-                f"Checkout Session 无法取消 - ID: {provider_txn_id}, "
-                f"订单号: {merchant_order_no}, 错误: {traceback.format_exc()}"
-            )
-            return {
-                "success": False,
-                "error": str(e),
-                "message": "Checkout Session 无法取消（可能已完成或状态不允许）",
-            }
-        except stripe.error.StripeError as e:
-            logger.error(
-                f"取消 Checkout Session 失败 - ID: {provider_txn_id}, 错误: {traceback.format_exc()}"
-            )
-            raise ValueError(f"Stripe 取消支付失败: {str(e)}")
-
-    async def get_refund(self, refund_id: str) -> dict:
-        """
-        查询 Stripe 退款状态
-
-        Args:
-            refund_id: Stripe Refund ID
-
-        Returns:
-            包含退款信息的字典
-
-        参考：https://docs.stripe.com/api/refunds/retrieve
-        """
-        try:
-            refund = stripe.Refund.retrieve(refund_id)
-
-            logger.info(
-                f"退款查询成功 - Refund ID: {refund.id}, "
-                f"状态: {refund.status}, "
-                f"金额: {refund.amount} {refund.currency.upper()}"
-            )
+            refund = await stripe.Refund.create_async(**refund_params)
 
             return {
                 "refund_id": refund.id,
@@ -405,42 +235,414 @@ class StripeAdapter(ProviderAdapter):
             }
 
         except stripe.error.StripeError as e:
-            logger.error(f"查询Stripe退款失败 - Refund ID: {refund_id}, 错误: {str(e)}")
-            traceback.print_exc()
+            raise ValueError(f"Stripe 退款失败: {str(e)}")
+
+    async def cancel_payment(
+        self,
+        *,
+        merchant_order_no: str,
+        provider_txn_id: str | None = None,
+    ) -> dict:
+        try:
+            session_id = provider_txn_id
+
+            if not session_id and provider_txn_id:
+                sessions = await stripe.checkout.Session.list_async(
+                    payment_intent=provider_txn_id,
+                    limit=1,
+                )
+                if sessions.data:
+                    session_id = sessions.data[0].id
+
+            if not session_id:
+                raise ValueError(
+                    "Stripe cancel_payment 需要提供 Checkout Session ID"
+                )
+
+            session = await stripe.checkout.Session.expire_async(session_id)
+
+            return {
+                "success": bool(session.status == "expired"),
+                "session_id": session.id,
+                "status": session.status,
+            }
+
+        except stripe.error.InvalidRequestError as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "Checkout Session 无法取消",
+            }
+        except stripe.error.StripeError as e:
+            raise ValueError(f"Stripe 取消支付失败: {str(e)}")
+
+    async def get_refund(self, refund_id: str) -> dict:
+        try:
+            refund = await stripe.Refund.retrieve_async(refund_id)
+            return {
+                "refund_id": refund.id,
+                "status": refund.status,
+                "amount": refund.amount,
+                "currency": refund.currency,
+                "payment_intent": refund.payment_intent,
+                "reason": refund.get("reason"),
+                "created": refund.created,
+            }
+        except stripe.error.StripeError as e:
             raise ValueError(f"查询 Stripe 退款失败: {str(e)}")
+
+    async def confirm_payment(
+        self, payment_id, provider_txn_id: str
+    ) -> dict:
+        """测试用：确认 Checkout Session 对应的 PaymentIntent（仅用于开发测试）"""
+        try:
+            session_id = provider_txn_id
+            if session_id.startswith("cs_"):
+                session = await stripe.checkout.Session.retrieve_async(session_id)
+                pi_id = session.payment_intent
+                if not pi_id:
+                    return {"success": False, "error": "Checkout Session 无 PaymentIntent"}
+            else:
+                pi_id = session_id
+
+            pi = await stripe.PaymentIntent.retrieve_async(pi_id)
+            if pi.status == "succeeded":
+                return {"success": True, "status": pi.status}
+
+            if pi.status == "requires_payment_method":
+                await stripe.PaymentIntent.modify_async(
+                    pi_id,
+                    payment_method="pm_card_visa",
+                )
+                pi = await stripe.PaymentIntent.confirm_async(pi_id)
+            elif pi.status == "requires_confirmation":
+                pi = await stripe.PaymentIntent.confirm_async(pi_id)
+
+            return {"success": pi.status == "succeeded", "status": pi.status}
+        except stripe.StripeError as e:
+            raise ValueError(f"Stripe 确认支付失败: {str(e)}")
+
+    # ==================== 订阅方法（SubscriptionProviderMixin 实现） ====================
+
+    async def create_customer(
+        self, *, email: str | None = None, metadata: dict | None = None
+    ) -> str:
+        customer = await stripe.Customer.create_async(
+            email=email, metadata=metadata or {}
+        )
+        return customer.id
+
+    async def create_product_and_price(
+        self,
+        *,
+        name: str,
+        amount: int,
+        currency: str,
+        interval: str,
+        interval_count: int,
+    ) -> tuple[str, str]:
+        stripe_interval = "month" if interval == "quarter" else interval
+        stripe_interval_count = (
+            3 * interval_count if interval == "quarter" else interval_count
+        )
+
+        product = await stripe.Product.create_async(name=name)
+        price = await stripe.Price.create_async(
+            product=product.id,
+            unit_amount=amount,
+            currency=currency.lower(),
+            recurring={
+                "interval": stripe_interval,
+                "interval_count": stripe_interval_count,
+            },
+        )
+        return product.id, price.id
+
+    async def create_price(
+        self,
+        *,
+        product_id: str,
+        amount: int,
+        currency: str,
+        interval: str,
+        interval_count: int,
+    ) -> str:
+        """在已有 Product 上创建新 Price"""
+        stripe_interval = "month" if interval == "quarter" else interval
+        stripe_interval_count = (
+            3 * interval_count if interval == "quarter" else interval_count
+        )
+
+        price = await stripe.Price.create_async(
+            product=product_id,
+            unit_amount=amount,
+            currency=currency.lower(),
+            recurring={
+                "interval": stripe_interval,
+                "interval_count": stripe_interval_count,
+            },
+        )
+        return price.id
+
+    async def archive_price(self, price_id: str) -> None:
+        await stripe.Price.modify_async(price_id, active=False)
+
+    async def create_subscription_checkout(
+        self,
+        *,
+        customer_id: str,
+        price_id: str,
+        subscription_id: str,
+        app_id: str,
+        plan_id: str,
+        success_url: str,
+        cancel_url: str,
+        metadata: dict | None = None,
+        trial_period_days: int | None = None,
+        expire_minutes: int | None = None,
+    ) -> SubscriptionCheckoutResult:
+        sub_metadata = {
+            "gateway_subscription_id": str(subscription_id),
+            **(metadata or {}),
+        }
+        subscription_data: dict = {"metadata": sub_metadata}
+        if trial_period_days:
+            subscription_data["trial_period_days"] = trial_period_days
+
+        session_metadata = {
+            "app_id": str(app_id),
+            "plan_id": str(plan_id),
+            "gateway_subscription_id": str(subscription_id),
+            **(metadata or {}),
+        }
+
+        session_data: dict = {
+            "mode": "subscription",
+            "customer": customer_id,
+            "line_items": [{"price": price_id, "quantity": 1}],
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "metadata": session_metadata,
+            "subscription_data": subscription_data,
+        }
+        if expire_minutes:
+            expire_seconds = max(1800, min(expire_minutes * 60, 86400))
+            session_data["expires_at"] = int(time.time() + expire_seconds)
+
+        session = await stripe.checkout.Session.create_async(**session_data)
+        return SubscriptionCheckoutResult(
+            session_id=session.id, checkout_url=session.url
+        )
+
+    async def cancel_subscription(
+        self,
+        subscription_id: str,
+        *,
+        immediate: bool = False,
+    ) -> SubscriptionActionResult:
+        try:
+            if immediate:
+                sub = await stripe.Subscription.cancel_async(subscription_id)
+            else:
+                sub = await stripe.Subscription.modify_async(
+                    subscription_id, cancel_at_period_end=True
+                )
+        except stripe.InvalidRequestError as e:
+            _handle_stripe_sub_error(e)
+        period_end = _get_sub_period_end(sub)
+        return SubscriptionActionResult(
+            subscription_id=sub.id,
+            status=sub.status,
+            current_period_end=(
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
+                else None
+            ),
+            cancel_at_period_end=sub.cancel_at_period_end,
+        )
+
+    async def resume_subscription(
+        self, subscription_id: str
+    ) -> SubscriptionActionResult:
+        try:
+            sub = await stripe.Subscription.modify_async(
+                subscription_id, cancel_at_period_end=False
+            )
+        except stripe.InvalidRequestError as e:
+            _handle_stripe_sub_error(e)
+        period_end = _get_sub_period_end(sub)
+        return SubscriptionActionResult(
+            subscription_id=sub.id,
+            status=sub.status,
+            current_period_end=(
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
+                else None
+            ),
+            cancel_at_period_end=False,
+        )
+
+    async def pause_subscription(
+        self, subscription_id: str
+    ) -> SubscriptionActionResult:
+        try:
+            sub = await stripe.Subscription.modify_async(
+                subscription_id,
+                pause_collection={"behavior": "void"},
+            )
+        except stripe.InvalidRequestError as e:
+            _handle_stripe_sub_error(e)
+        period_end = _get_sub_period_end(sub)
+        return SubscriptionActionResult(
+            subscription_id=sub.id,
+            status=sub.status,
+            current_period_end=(
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
+                else None
+            ),
+            cancel_at_period_end=sub.cancel_at_period_end,
+        )
+
+    async def unpause_subscription(
+        self, subscription_id: str
+    ) -> SubscriptionActionResult:
+        try:
+            sub = await stripe.Subscription.modify_async(
+                subscription_id,
+                pause_collection="",
+            )
+        except stripe.InvalidRequestError as e:
+            _handle_stripe_sub_error(e)
+        period_end = _get_sub_period_end(sub)
+        return SubscriptionActionResult(
+            subscription_id=sub.id,
+            status=sub.status,
+            current_period_end=(
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
+                else None
+            ),
+            cancel_at_period_end=sub.cancel_at_period_end,
+        )
+
+    async def change_subscription_plan(
+        self,
+        subscription_id: str,
+        *,
+        new_price_id: str,
+        proration_mode: str = "auto",
+        credit_amount: int | None = None,
+        currency: str | None = None,
+        customer_id: str | None = None,
+    ) -> SubscriptionActionResult:
+        current_sub = await stripe.Subscription.retrieve_async(subscription_id)
+        if not current_sub["items"]["data"]:
+            raise ValueError(f"订阅 {subscription_id} 无 items，无法变更")
+        current_item_id = current_sub["items"]["data"][0].id
+
+        modify_params = {
+            "items": [{"id": current_item_id, "price": new_price_id}],
+            "proration_behavior": "always_invoice",
+            "billing_cycle_anchor": "now",
+        }
+        sub = await stripe.Subscription.modify_async(
+            subscription_id, **modify_params
+        )
+
+        period_end = _get_sub_period_end(sub)
+        return SubscriptionActionResult(
+            subscription_id=sub.id,
+            status=sub.status,
+            current_period_end=(
+                datetime.fromtimestamp(period_end, tz=UTC)
+                if period_end
+                else None
+            ),
+            cancel_at_period_end=sub.cancel_at_period_end,
+        )
+
+    async def preview_plan_change(
+        self,
+        subscription_id: str,
+        *,
+        new_price_id: str,
+    ) -> dict:
+        """使用 Stripe Invoice.create_preview 预览变更费用，与实际扣费逻辑一致。"""
+        current_sub = await stripe.Subscription.retrieve_async(subscription_id)
+        if not current_sub["items"]["data"]:
+            raise ValueError(f"订阅 {subscription_id} 无 items，无法预览")
+        current_item_id = current_sub["items"]["data"][0].id
+
+        preview = await stripe.Invoice.create_preview_async(
+            subscription=subscription_id,
+            subscription_details={
+                "items": [{"id": current_item_id, "price": new_price_id}],
+                "proration_behavior": "always_invoice",
+                "billing_cycle_anchor": "now",
+            },
+        )
+
+        lines = []
+        for line in preview.lines.data:
+            lines.append({
+                "amount": line.amount,
+                "description": line.description or "",
+            })
+
+        return {
+            "currency": preview.currency,
+            "total": preview.total,
+            "lines": lines,
+        }
+
+    async def schedule_subscription_downgrade(
+        self,
+        subscription_id: str,
+        *,
+        new_price_id: str,
+        current_period_end: int,
+    ) -> str:
+        schedule = await stripe.SubscriptionSchedule.create_async(
+            from_subscription=subscription_id,
+        )
+
+        current_phase = schedule.phases[0]
+        current_items = [{"price": item["price"]} for item in current_phase["items"]]
+
+        await stripe.SubscriptionSchedule.modify_async(
+            schedule.id,
+            end_behavior="release",
+            phases=[
+                {
+                    "items": current_items,
+                    "start_date": current_phase.start_date,
+                    "end_date": current_period_end,
+                },
+                {
+                    "items": [{"price": new_price_id}],
+                    "start_date": current_period_end,
+                },
+            ],
+        )
+
+        return schedule.id
+
+    async def release_subscription_schedule(self, schedule_id: str) -> None:
+        await stripe.SubscriptionSchedule.release_async(schedule_id)
+
+    # ==================== 回调解析（重构） ====================
 
     async def parse_and_verify_callback(
         self,
         headers: dict[str, str],
         body: bytes,
     ) -> CallbackEvent:
-        """
-        验证并解析 Stripe Webhook
-
-        支持的事件类型：
-        - checkout.session.completed: Checkout Session 完成
-        - checkout.session.async_payment_succeeded: 异步支付成功（Alipay等）
-        - checkout.session.async_payment_failed: 异步支付失败
-        - checkout.session.expired: Session 过期（网关统一视为 canceled）
-        - refund.updated: 退款状态更新
-        - refund.failed: 退款失败
-
-        Args:
-            headers: HTTP 请求头
-            body: HTTP 请求体（原始字节）
-
-        Returns:
-            CallbackEvent: 解析后的回调事件
-
-        参考：https://docs.stripe.com/webhooks
-        """
         if not self.webhook_secret:
-            logger.error("未配置 Stripe webhook_secret")
             raise ValueError("Stripe webhook_secret not configured")
 
         sig_header = headers.get("stripe-signature")
         if not sig_header:
-            logger.error("缺少 Stripe-Signature 请求头")
             raise ValueError("Missing Stripe-Signature header")
 
         try:
@@ -450,64 +652,54 @@ class StripeAdapter(ProviderAdapter):
                 secret=self.webhook_secret,
             )
         except stripe.error.SignatureVerificationError as e:
-            logger.error(f"Stripe 签名验证失败: {str(e)}")
             raise ValueError(f"Stripe signature verification failed: {e}")
 
-        # 解析事件
         event_type = event["type"]
         event_data = event["data"]["object"]
-        provider_event_id = event["id"]
-
-        logger.info(
-            f"收到Stripe Webhook事件 - 类型: {event_type}, ID: {provider_event_id}"
-        )
 
         if event_type.startswith("checkout.session"):
-            # Checkout Session 事件
-            provider_txn_id, merchant_order_no, outcome = self._parse_checkout_event(
-                event_type, event_data
+            mode = event_data.get("mode")
+            if mode == "subscription":
+                return self._parse_subscription_checkout_event(
+                    event_type, event_data, event
+                )
+            else:
+                return self._parse_payment_checkout_event(
+                    event_type, event_data, event
+                )
+
+        elif event_type.startswith("customer.subscription"):
+            return self._parse_subscription_lifecycle_event(
+                event_type, event_data, event
             )
+
+        elif event_type.startswith("invoice."):
+            return self._parse_invoice_event(event_type, event_data, event)
+
         elif event_type in {"refund.updated", "refund.failed"}:
-            # Refund 事件
-            provider_txn_id, merchant_order_no, outcome = self._parse_refund_event(
-                event_type, event_data
-            )
+            return self._parse_refund_event(event_type, event_data, event)
+
         else:
             raise IgnoredException(f"忽略非支持事件类型: {event_type}")
 
-        logger.info(
-            f"Webhook 事件解析完成 - 结果: {outcome}, "
-            f"订单号: {merchant_order_no}, "
-            f"交易ID: {provider_txn_id}"
-        )
-
-        return CallbackEvent(
-            provider_event_id=provider_event_id,
-            provider_txn_id=provider_txn_id,
-            merchant_order_no=merchant_order_no,
-            outcome=outcome,
-            raw_payload=event,
-        )
-
-    def _parse_checkout_event(
-        self, event_type: str, event_data: dict
-    ) -> tuple[str | None, str | None, str]:
-        # Checkout Session 事件
+    def _parse_payment_checkout_event(
+        self, event_type: str, event_data: dict, event: dict
+    ) -> CallbackEvent:
         provider_txn_id = event_data.get("payment_intent")
-        merchant_order_no = event_data.get("metadata", {}).get("merchant_order_no")
+        metadata = event_data.get("metadata", {})
+        merchant_order_no = metadata.get("merchant_order_no")
+        app_id_str = metadata.get("app_id")
+        app_id = uuid.UUID(app_id_str) if app_id_str else None
 
-        # Checkout Session 完成：无论是否有 payment_intent，都以 payment_status 为准
         if event_type == "checkout.session.completed":
             payment_status = event_data.get("payment_status")
             if payment_status == "paid":
                 outcome = "succeeded"
             elif payment_status == "unpaid":
-                # 异步支付方式（如 Alipay）常见：Session completed 但尚未支付完成
                 outcome = "pending"
             else:
                 outcome = "unknown"
         else:
-            # 其他 Checkout Session 事件
             outcome_map = {
                 "checkout.session.async_payment_succeeded": "succeeded",
                 "checkout.session.async_payment_failed": "failed",
@@ -515,12 +707,20 @@ class StripeAdapter(ProviderAdapter):
             }
             outcome = outcome_map.get(event_type, "unknown")
 
-        return provider_txn_id, merchant_order_no, outcome
+        return CallbackEvent(
+            provider=self.provider,
+            provider_event_id=event["id"],
+            provider_txn_id=provider_txn_id,
+            merchant_order_no=merchant_order_no,
+            outcome=outcome,
+            event_category=EventCategory.payment,
+            app_id=app_id,
+            raw_payload=event,
+        )
 
     def _parse_refund_event(
-        self, event_type: str, event_data: dict
-    ) -> tuple[str | None, str | None, str]:
-        # Refund 事件
+        self, event_type: str, event_data: dict, event: dict
+    ) -> CallbackEvent:
         provider_txn_id = event_data.get("payment_intent") or event_data.get("charge")
         merchant_order_no = event_data.get("metadata", {}).get("merchant_order_no")
         refund_status = event_data.get("status")
@@ -536,10 +736,147 @@ class StripeAdapter(ProviderAdapter):
             }
             outcome = outcome_map.get(refund_status, "refund_unknown")
 
-        return provider_txn_id, merchant_order_no, outcome
+        return CallbackEvent(
+            provider=self.provider,
+            provider_event_id=event["id"],
+            provider_txn_id=provider_txn_id,
+            merchant_order_no=merchant_order_no,
+            outcome=outcome,
+            event_category=EventCategory.refund,
+            raw_payload=event,
+        )
+
+    def _parse_subscription_checkout_event(
+        self, event_type: str, event_data: dict, event: dict
+    ) -> CallbackEvent:
+        subscription_id = event_data.get("subscription")
+        checkout_session_id = event_data.get("id")
+
+        if event_type == "checkout.session.completed":
+            outcome = (
+                "subscription_activated"
+                if event_data.get("payment_status") == "paid"
+                else "subscription_pending"
+            )
+        elif event_type == "checkout.session.expired":
+            outcome = "subscription_expired"
+        elif event_type == "checkout.session.async_payment_succeeded":
+            outcome = "subscription_activated"
+        elif event_type == "checkout.session.async_payment_failed":
+            outcome = "subscription_payment_failed"
+        else:
+            outcome = "subscription_unknown"
+
+        return CallbackEvent(
+            provider=self.provider,
+            provider_event_id=event["id"],
+            provider_txn_id=subscription_id,
+            merchant_order_no=None,
+            outcome=outcome,
+            event_category=EventCategory.subscription,
+            subscription_id=subscription_id,
+            checkout_session_id=checkout_session_id,
+            raw_payload=event,
+        )
+
+    def _parse_subscription_lifecycle_event(
+        self, event_type: str, event_data: dict, event: dict
+    ) -> CallbackEvent:
+        subscription_id = event_data.get("id")
+        gateway_subscription_id_str = event_data.get("metadata", {}).get(
+            "gateway_subscription_id"
+        )
+        gateway_subscription_id = None
+        if gateway_subscription_id_str:
+            try:
+                gateway_subscription_id = uuid.UUID(gateway_subscription_id_str)
+            except ValueError:
+                pass
+
+        if event_type == "customer.subscription.created":
+            outcome = "subscription_created"
+        elif event_type == "customer.subscription.updated":
+            previous_attrs = event.get("data", {}).get("previous_attributes", {})
+            pause_collection = event_data.get("pause_collection")
+            prev_pause = previous_attrs.get("pause_collection")
+
+            if (
+                pause_collection
+                and prev_pause is None
+                and "pause_collection" in previous_attrs
+            ):
+                outcome = "subscription_paused"
+            elif (
+                not pause_collection
+                and prev_pause is not None
+                and "pause_collection" in previous_attrs
+            ):
+                outcome = "subscription_resumed"
+            else:
+                outcome = "subscription_updated"
+        else:
+            outcome_map = {
+                "customer.subscription.deleted": "subscription_canceled",
+                "customer.subscription.paused": "subscription_paused",
+                "customer.subscription.resumed": "subscription_resumed",
+                "customer.subscription.trial_will_end": "subscription_trial_will_end",
+            }
+            outcome = outcome_map.get(event_type, "subscription_unknown")
+
+        return CallbackEvent(
+            provider=self.provider,
+            provider_event_id=event["id"],
+            provider_txn_id=subscription_id,
+            merchant_order_no=None,
+            outcome=outcome,
+            event_category=EventCategory.subscription,
+            subscription_id=subscription_id,
+            gateway_subscription_id=gateway_subscription_id,
+            raw_payload=event,
+        )
+
+    def _parse_invoice_event(
+        self, event_type: str, event_data: dict, event: dict
+    ) -> CallbackEvent:
+        subscription_id = event_data.get("subscription")
+        if not subscription_id:
+            raise IgnoredException(f"忽略非订阅 Invoice 事件: {event_type}")
+
+        gateway_subscription_id_str = (
+            event_data.get("subscription_details", {})
+            .get("metadata", {})
+            .get("gateway_subscription_id")
+        )
+        gateway_subscription_id = None
+        if gateway_subscription_id_str:
+            try:
+                gateway_subscription_id = uuid.UUID(gateway_subscription_id_str)
+            except ValueError:
+                pass
+
+        outcome_map = {
+            "invoice.paid": "invoice_paid",
+            "invoice.payment_failed": "invoice_payment_failed",
+            "invoice.payment_action_required": "invoice_action_required",
+        }
+        outcome = outcome_map.get(event_type)
+        if not outcome:
+            raise IgnoredException(f"忽略非支持 Invoice 事件类型: {event_type}")
+
+        return CallbackEvent(
+            provider=self.provider,
+            provider_event_id=event["id"],
+            provider_txn_id=subscription_id,
+            merchant_order_no=None,
+            outcome=outcome,
+            event_category=EventCategory.invoice,
+            subscription_id=subscription_id,
+            gateway_subscription_id=gateway_subscription_id,
+            invoice_id=event_data.get("id"),
+            raw_payload=event,
+        )
 
 
-# 延迟初始化单例实例（只在首次访问时创建）
 _stripe_adapter_instance = None
 
 

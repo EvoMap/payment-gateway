@@ -108,3 +108,14 @@ class PaymentProviderException(BaseAPIException):
         self, message: str = "支付渠道异常", code: int = 5020, details: Any = None
     ):
         super().__init__(message=message, code=code, status_code=502, details=details)
+
+
+class ProviderNotAllowedException(BadRequestException):
+    """支付渠道未开放 - 400"""
+
+    def __init__(self, provider: str):
+        super().__init__(
+            message=f"支付渠道 {provider} 未开放，请检查 ALLOWED_PROVIDERS 配置",
+            code=4001,
+            details={"provider": provider},
+        )

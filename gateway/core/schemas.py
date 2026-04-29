@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from gateway.core.constants import (
     Provider,
@@ -15,6 +15,10 @@ from gateway.core.constants import (
     PaymentStatus,
     DeliveryStatus,
     RefundStatus,
+    EventCategory,
+    BillingInterval,
+    SubscriptionStatus,
+    ProrationMode,
 )
 
 
@@ -54,7 +58,6 @@ class CreatePaymentRequest(BaseModel):
     expire_minutes: int | None = Field(
         None, gt=0, le=1440, description="过期时间（分钟）"
     )
-    # 可选参数
     success_url: str | None = Field(
         None, max_length=2048, description="支付成功跳转 URL"
     )
@@ -62,6 +65,11 @@ class CreatePaymentRequest(BaseModel):
         None, max_length=2048, description="取消支付跳转 URL"
     )
     metadata: dict[str, Any] | None = Field(None, description="额外的元数据")
+    external_user_id: str | None = Field(
+        None,
+        max_length=128,
+        description="调用方用户标识（可选，填写后启用 pending 并发控制）",
+    )
 
 
 class CreatePaymentResponse(BaseModel):
@@ -72,12 +80,6 @@ class CreatePaymentResponse(BaseModel):
     status: PaymentStatus = Field(..., description="支付状态")
     type: PaymentTypeEnum = Field(..., description="返回类型")
     payload: dict[str, Any] = Field(..., description="类型对应的 payload")
-
-    # 示例：
-    # type=redirect: payload={\"url\": \"https://...\"}
-    # type=form: payload={\"html\": \"<form>...</form>\"}
-    # type=qr: payload={\"code_url\": \"weixin://...\"}
-    # type=client_secret: payload={\"client_secret\": \"pi_xxx_secret_xxx\"}
 
 
 # ===== 查询支付 =====
@@ -99,8 +101,7 @@ class PaymentResponse(BaseModel):
     updated_at: datetime
     paid_at: datetime | None
 
-    class Config:
-        from_attributes = True  # Pydantic v2: 允许从 ORM 模型创建
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ===== 取消支付 =====
@@ -124,21 +125,27 @@ class CancelPaymentResponse(BaseModel):
     provider_result: dict[str, Any] | None = Field(None, description="支付渠道返回结果")
 
 
-# ===== 渠道回调（内部处理，无需公开 schema） =====
+# ===== 渠道回调 =====
 
 
-# 回调由 provider adapter 解析，这里只保留必要的内部事件结构
 class CallbackEvent(BaseModel):
     """标准化回调事件（provider adapter 输出）"""
 
+    provider: Provider
     provider_event_id: str
     provider_txn_id: str | None
     merchant_order_no: str | None
-    outcome: str  # "succeeded" | "failed" | "pending" | ...
+    outcome: str
+    event_category: EventCategory | None = None
+    app_id: UUID | None = None
+    subscription_id: str | None = None
+    checkout_session_id: str | None = None
+    gateway_subscription_id: UUID | None = None
+    invoice_id: str | None = None
     raw_payload: dict[str, Any]
 
 
-# ===== WebhookDelivery 状态查询（可选，供内部调试） =====
+# ===== WebhookDelivery =====
 
 
 class WebhookDeliveryResponse(BaseModel):
@@ -154,8 +161,7 @@ class WebhookDeliveryResponse(BaseModel):
     delivered_at: datetime | None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ===== 应用管理 =====
@@ -181,8 +187,7 @@ class AppResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AppListResponse(BaseModel):
@@ -200,11 +205,11 @@ class CreateRefundRequest(BaseModel):
 
     payment_id: UUID = Field(..., description="支付交易ID")
     refund_amount: int | None = Field(
-        None, gt=0, description="退款金额（最小货币单位，如分）。不填则为全额退款"
+        None, gt=0, description="退款金额（最小货币单位）。不填则为全额退款"
     )
     reason: str | None = Field(None, max_length=500, description="退款原因")
     notify_url: str | None = Field(
-        None, max_length=2048, description="退款结果回调通知地址（覆盖 App 默认）"
+        None, max_length=2048, description="退款结果回调通知地址"
     )
 
 
@@ -223,8 +228,7 @@ class RefundResponse(BaseModel):
     updated_at: datetime
     refunded_at: datetime | None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class RefundListResponse(BaseModel):
@@ -232,3 +236,132 @@ class RefundListResponse(BaseModel):
 
     total: int = Field(..., description="总数")
     items: list[RefundResponse] = Field(..., description="退款列表")
+
+
+# ===== 计划相关 =====
+
+
+class CreatePlanRequest(BaseModel):
+    provider: Provider = Field(..., description="支付渠道")
+    slug: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = None
+    amount: int = Field(..., gt=0)
+    currency: Currency
+    interval: BillingInterval
+    interval_count: int = Field(default=1, ge=1)
+    tier: int = Field(default=0)
+    features: dict | None = None
+
+
+class UpdatePlanRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    amount: int | None = Field(None, gt=0)
+    tier: int | None = None
+    features: dict | None = None
+    is_active: bool | None = None
+
+
+class PlanResponse(BaseModel):
+    id: UUID
+    slug: str
+    name: str
+    description: str | None
+    amount: int
+    currency: Currency
+    interval: BillingInterval
+    interval_count: int
+    tier: int
+    features: dict | None
+    is_active: bool
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PlanListResponse(BaseModel):
+    total: int
+    items: list[PlanResponse]
+
+
+# ===== 订阅相关 =====
+
+
+class CreateSubscriptionRequest(BaseModel):
+    external_user_id: str = Field(..., min_length=1, max_length=128)
+    plan_id: UUID
+    email: str | None = None
+    success_url: str = Field(..., max_length=2048)
+    cancel_url: str = Field(..., max_length=2048)
+    notify_url: str | None = Field(None, max_length=2048)
+    trial_period_days: int | None = Field(None, ge=1, le=365)
+    metadata: dict | None = None
+    force_cleanup: bool = False
+
+
+class CreateSubscriptionResponse(BaseModel):
+    subscription_id: UUID
+    checkout_url: str
+    status: SubscriptionStatus
+
+
+class SubscriptionResponse(BaseModel):
+    id: UUID
+    external_user_id: str
+    plan: PlanResponse
+    pending_plan: PlanResponse | None = None
+    pending_plan_change_at: datetime | None = None
+    amount: int
+    currency: Currency
+    status: SubscriptionStatus
+    current_period_start: datetime | None
+    current_period_end: datetime | None
+    cancel_at_period_end: bool
+    canceled_at: datetime | None
+    trial_start: datetime | None
+    trial_end: datetime | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SubscriptionListResponse(BaseModel):
+    total: int
+    items: list[SubscriptionResponse]
+
+
+class CancelSubscriptionRequest(BaseModel):
+    immediate: bool = Field(default=False, description="是否立即取消")
+
+
+class ChangePlanRequest(BaseModel):
+    new_plan_id: UUID
+    proration_mode: ProrationMode | None = None
+    credit_amount: int | None = None
+
+
+class ChangePlanResponse(BaseModel):
+    subscription_id: UUID
+    direction: str
+    effective: str
+    current_plan: PlanResponse
+    pending_plan: PlanResponse | None
+    pending_plan_change_at: datetime | None
+    current_period_end: datetime | None = None
+    status: str
+
+
+class PreviewChangePlanRequest(BaseModel):
+    new_plan_id: UUID
+
+
+class PreviewChangePlanLineItem(BaseModel):
+    amount: int = Field(..., description="金额（最小货币单位，如分）")
+    description: str = Field(default="", description="行项目描述")
+
+
+class PreviewChangePlanResponse(BaseModel):
+    currency: str
+    total: int = Field(..., description="总金额（最小货币单位）")
+    lines: list[PreviewChangePlanLineItem] = Field(default_factory=list, description="发票行项目明细")

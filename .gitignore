@@ -59,7 +59,7 @@ run.py
 
 # Resources
 *.example
+!env.example
 *.html
-*.yml
 *.ini
 *.md

@@ -154,24 +154,6 @@ class RefundService:
                     status=stripe_status,
                 )
 
-            elif payment.provider == Provider.alipay:
-                # TODO: 实现支付宝退款
-                log.warning("支付宝退款未实现")
-                raise ServiceUnavailableException(
-                    message="支付宝退款功能尚未实现",
-                    code=5031,
-                    details={"provider": "alipay"},
-                )
-
-            elif payment.provider == Provider.wechatpay:
-                # TODO: 实现微信支付退款
-                log.warning("微信退款未实现")
-                raise ServiceUnavailableException(
-                    message="微信支付退款功能尚未实现",
-                    code=5032,
-                    details={"provider": "wechatpay"},
-                )
-
             else:
                 log.error("不支持的支付渠道", provider=payment.provider.value)
                 raise BadRequestException(

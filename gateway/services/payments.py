@@ -1,12 +1,14 @@
 """
-支付服务层（创建/查询/状态机推进）
+支付服务层（创建/查询/状态机推进 + external_user_id 并发控制）
 """
 
+import hashlib
+import struct
 import uuid
 from datetime import datetime, UTC
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
@@ -30,16 +32,6 @@ class PaymentService:
         req: CreatePaymentRequest,
         idempotency_key: str | None = None,
     ) -> tuple[Payment, bool]:
-        """
-        创建或获取支付（弱幂等：以 merchant_order_no 为准）
-
-        返回：(Payment, is_new: bool)
-
-        冲突规则：
-        - 若同一 merchant_order_no 已存在，检查关键字段（amount/currency/provider）
-        - 若不一致，返回 409
-        - 若一致，返回已有 Payment
-        """
         log = logger.bind(
             app_id=str(app.id),
             merchant_order_no=req.merchant_order_no,
@@ -47,7 +39,39 @@ class PaymentService:
             idempotency_key=idempotency_key,
         )
 
-        # 尝试查找已有订单
+        # external_user_id 并发控制
+        if req.external_user_id:
+            user_lock_key = struct.unpack(
+                ">q",
+                hashlib.sha256(
+                    f"{app.id}:user:{req.external_user_id}".encode()
+                ).digest()[:8],
+            )[0]
+            await self.session.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": user_lock_key},
+            )
+
+            pending_stmt = select(func.count()).where(
+                Payment.app_id == app.id,
+                Payment.external_user_id == req.external_user_id,
+                Payment.status == PaymentStatus.pending,
+            )
+            pending_count = (
+                await self.session.execute(pending_stmt)
+            ).scalar()
+            if pending_count >= 1:
+                raise ConflictException(
+                    message="该用户已有未完成的支付订单", code=4093
+                )
+
+        # merchant_order_no advisory lock
+        raw = f"{app.id}:{req.merchant_order_no}".encode()
+        lock_key = struct.unpack(">q", hashlib.sha256(raw).digest()[:8])[0]
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key}
+        )
+
         stmt = select(Payment).where(
             Payment.app_id == app.id,
             Payment.merchant_order_no == req.merchant_order_no,
@@ -56,10 +80,8 @@ class PaymentService:
         existing = result.scalar_one_or_none()
 
         if existing:
-            # 计算请求的总金额
             request_total_amount = (req.unit_amount or 0) * req.quantity
 
-            # 幂等检查：验证关键字段是否一致
             if (
                 existing.amount != request_total_amount
                 or existing.currency != req.currency
@@ -68,37 +90,21 @@ class PaymentService:
                 log.warning(
                     "幂等校验冲突",
                     existing_amount=existing.amount,
-                    existing_currency=existing.currency.value,
-                    existing_provider=existing.provider.value,
                     request_amount=request_total_amount,
-                    request_currency=req.currency.value,
-                    request_provider=req.provider.value,
                 )
                 raise ConflictException(
                     message="该商户订单号已存在，但关键参数不一致",
                     code=4091,
                     details={
                         "merchant_order_no": req.merchant_order_no,
-                        "existing": {
-                            "amount": existing.amount,
-                            "currency": existing.currency.value,
-                            "provider": existing.provider.value,
-                        },
-                        "request": {
-                            "amount": request_total_amount,
-                            "currency": req.currency.value,
-                            "provider": req.provider.value,
-                        },
                     },
                 )
 
             log.info("幂等命中返回已有支付", payment_id=str(existing.id))
             return existing, False
 
-        # 计算总金额（单价 * 数量）
         total_amount = (req.unit_amount or 0) * req.quantity
 
-        # 创建新支付
         payment = Payment(
             id=uuid.uuid4(),
             app_id=app.id,
@@ -109,6 +115,7 @@ class PaymentService:
             status=PaymentStatus.pending,
             notify_url=req.notify_url or app.notify_url,
             provider_txn_id=None,
+            external_user_id=req.external_user_id,
         )
 
         self.session.add(payment)
@@ -118,7 +125,6 @@ class PaymentService:
             log.info("支付记录已创建", payment_id=str(payment.id))
             return payment, True
         except IntegrityError as exc:
-            # 并发创建冲突（理论上应该被前面的 select 捕获，但保险起见）
             await self.session.rollback()
             log.warning("支付创建并发冲突", error=str(exc))
             raise ConflictException(
@@ -128,7 +134,6 @@ class PaymentService:
             )
 
     async def get_payment_by_id(self, app: App, payment_id: uuid.UUID) -> Payment:
-        """按 payment_id 查询支付（需验证归属）"""
         stmt = select(Payment).where(
             Payment.id == payment_id,
             Payment.app_id == app.id,
@@ -148,7 +153,6 @@ class PaymentService:
     async def get_payment_by_merchant_order_no(
         self, app: App, merchant_order_no: str
     ) -> Payment:
-        """按 merchant_order_no 查询支付"""
         stmt = select(Payment).where(
             Payment.app_id == app.id,
             Payment.merchant_order_no == merchant_order_no,
@@ -171,17 +175,6 @@ class PaymentService:
         new_status: PaymentStatus,
         provider_txn_id: str | None = None,
     ):
-        """
-        更新支付状态（状态机推进）
-
-        注意：调用者应在事务内调用，并负责 commit
-        """
-        log = logger.bind(
-            payment_id=str(payment.id),
-            old_status=payment.status.value,
-            new_status=new_status.value,
-        )
-
         payment.status = new_status
 
         if provider_txn_id and not payment.provider_txn_id:
@@ -189,5 +182,3 @@ class PaymentService:
 
         if new_status == PaymentStatus.succeeded and not payment.paid_at:
             payment.paid_at = datetime.now(UTC)
-
-        log.info("支付状态已更新")

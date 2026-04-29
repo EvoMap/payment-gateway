@@ -21,7 +21,7 @@ from gateway.core.schemas import (
 )
 from gateway.core.responses import success_response
 from gateway.services.callbacks import CallbackService
-from gateway.core.constants import PaymentStatus, Provider
+from gateway.core.constants import PaymentStatus, Provider, EventCategory
 from gateway.core.schemas import CreateAppRequest, AppResponse, AppListResponse
 from gateway.core.exceptions import (
     NotFoundException,
@@ -238,10 +238,13 @@ async def test_payment_success(
     # 参考：https://docs.stripe.com/webhooks
     event_id = f"evt_test_{payment_id}_{int(__import__('time').time())}"
     callback_event = CallbackEvent(
+        provider=provider,
         provider_event_id=event_id,
         provider_txn_id=provider_txn_id,
         merchant_order_no=payment.merchant_order_no,
-        outcome="succeeded",  # 已确认 Stripe 侧成功
+        outcome="succeeded",
+        event_category=EventCategory.payment,
+        app_id=payment.app_id,
         raw_payload={
             "id": event_id,
             "object": "event",
