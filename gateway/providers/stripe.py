@@ -57,6 +57,10 @@ def _get_sub_period_end(sub) -> int | None:
     return None
 
 
+# wechat_pay 使用 Stripe payment link 模式，不支持 payment_intent_data
+_NO_PAYMENT_INTENT_DATA = {"wechat_pay"}
+
+
 class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
     """Stripe 支付 + 订阅适配器"""
 
@@ -117,7 +121,14 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
         cancel_url = kwargs.get("cancel_url")
         metadata = kwargs.get("metadata")
         customer_email = metadata.get("customer_email") if metadata else None
-        payment_method_types = kwargs.get("payment_method_types")
+        payment_method = kwargs.get("payment_method")
+        payment_options = kwargs.get("payment_options")
+        method_type = payment_method.value if payment_method else None
+
+        if payment_method:
+            payment_method_types = [method_type]
+        else:
+            payment_method_types = kwargs.get("payment_method_types")
 
         session_metadata = {
             "merchant_order_no": merchant_order_no,
@@ -142,16 +153,24 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
                 }
             ],
             "metadata": session_metadata,
-            "payment_intent_data": {"metadata": session_metadata},
             "success_url": success_url
             or "https://example.com/success?session_id={CHECKOUT_SESSION_ID}",
             "cancel_url": cancel_url or "https://example.com/cancel",
         }
 
+        if method_type is None or method_type not in _NO_PAYMENT_INTENT_DATA:
+            session_data["payment_intent_data"] = {"metadata": session_metadata}
+
         if payment_method_types:
             session_data["payment_method_types"] = payment_method_types
         else:
             session_data["payment_method_types"] = ["card"]
+
+        if payment_method and method_type == "wechat_pay":
+            client = (payment_options or {}).get("client", "web")
+            session_data["payment_method_options"] = {
+                "wechat_pay": {"client": client}
+            }
 
         if expire_minutes:
             expire_seconds = max(1800, min(expire_minutes * 60, 86400))
@@ -169,10 +188,16 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
             )
         except stripe.error.InvalidRequestError as e:
             error_msg = str(e)
-            if "payment_method" in error_msg.lower() and session_data.get(
-                "payment_method_types"
-            ) != ["card"]:
+            # fallback 仅适用于未显式指定 payment_method 的场景（如 app 配置了不兼容的默认类型）
+            if (
+                "payment_method" in error_msg.lower()
+                and session_data.get("payment_method_types") != ["card"]
+                and not payment_method
+            ):
                 session_data["payment_method_types"] = ["card"]
+                session_data.pop("payment_method_options", None)
+                if "payment_intent_data" not in session_data:
+                    session_data["payment_intent_data"] = {"metadata": session_metadata}
                 try:
                     session = await stripe.checkout.Session.create_async(**session_data)
                     return ProviderPaymentResult(

@@ -79,6 +79,8 @@ async def create_payment(
         cancel_url=req.cancel_url,
         metadata={**(req.metadata or {}), "app_id": str(app.id)},
         app_id=str(app.id),
+        payment_method=req.payment_method,
+        payment_options=req.payment_options,
     )
 
     if result.provider_txn_id and not payment.provider_txn_id:

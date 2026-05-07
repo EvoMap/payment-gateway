@@ -5,6 +5,15 @@ class Provider(str, enum.Enum):
     stripe = "stripe"
 
 
+class PaymentMethod(str, enum.Enum):
+    card = "card"
+    wechat_pay = "wechat_pay"
+    alipay = "alipay"
+
+
+ALIPAY_SUPPORTED_CURRENCIES = frozenset({"CNY", "USD", "HKD", "EUR", "GBP"})
+
+
 class Currency(str, enum.Enum):
     USD = "USD"  # 美元
     CNY = "CNY"  # 人民币

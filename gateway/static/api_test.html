@@ -491,6 +491,8 @@ const ENDPOINTS = [
         params: [
           { name: 'merchant_order_no', label: '商户订单号', type: 'string', required: true, place: 'body', placeholder: 'ORDER_001', db: 'payments.merchant_order_no' },
           { name: 'provider', label: '支付渠道', type: 'enum', required: true, place: 'body', options: ['stripe'], db: 'payments.provider' },
+          { name: 'payment_method', label: '支付方式', type: 'enum', required: false, place: 'body', options: ['card','wechat_pay','alipay'], db: 'N/A (pass-through)' },
+          { name: 'payment_options', label: '支付选项 (JSON)', type: 'json', required: false, place: 'body', placeholder: '{"client": "web"}', db: 'N/A (pass-through)' },
           { name: 'currency', label: '币种', type: 'enum', required: true, place: 'body', options: ['USD','CNY','HKD','KRW','THB','EUR','GBP','JPY','INR'], db: 'payments.currency' },
           { name: 'quantity', label: '商品数量', type: 'integer', required: true, place: 'body', default: '1' },
           { name: 'unit_amount', label: '单价 (最小货币单位)', type: 'integer', required: false, place: 'body', placeholder: '1000 = $10.00', db: 'payments.amount (quantity*unit_amount)' },

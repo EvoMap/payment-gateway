@@ -7,11 +7,13 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from gateway.core.constants import (
     Provider,
     Currency,
+    PaymentMethod,
+    ALIPAY_SUPPORTED_CURRENCIES,
     PaymentStatus,
     DeliveryStatus,
     RefundStatus,
@@ -70,6 +72,48 @@ class CreatePaymentRequest(BaseModel):
         max_length=128,
         description="调用方用户标识（可选，填写后启用 pending 并发控制）",
     )
+    payment_method: PaymentMethod | None = Field(
+        None,
+        description="支付方式（card / wechat_pay / alipay）。不填默认 card",
+    )
+    payment_options: dict[str, Any] | None = Field(
+        None,
+        description="支付方式附加选项（如 wechat_pay 需要 {\"client\": \"web\"}）",
+    )
+
+    @model_validator(mode="after")
+    def validate_payment_options(self) -> "CreatePaymentRequest":
+        if self.payment_options and self.payment_method is None:
+            raise ValueError(
+                "传入 payment_options 时必须同时指定 payment_method"
+            )
+        if self.payment_method == PaymentMethod.wechat_pay:
+            opts = self.payment_options or {}
+            allowed_keys = {"client"}
+            extra = set(opts.keys()) - allowed_keys
+            if extra:
+                raise ValueError(
+                    f"wechat_pay payment_options 仅支持 {allowed_keys}，"
+                    f"多余字段: {extra}"
+                )
+            client = opts.get("client")
+            if client is not None and client not in ("web", "ios", "android"):
+                raise ValueError(
+                    "payment_options.client 值必须为 web / ios / android 之一"
+                )
+        elif self.payment_method == PaymentMethod.alipay:
+            if self.payment_options:
+                raise ValueError("alipay 不需要 payment_options")
+            if self.currency.value not in ALIPAY_SUPPORTED_CURRENCIES:
+                supported = sorted(ALIPAY_SUPPORTED_CURRENCIES)
+                raise ValueError(
+                    f"alipay 仅支持 {supported} 币种，"
+                    f"当前: {self.currency.value}"
+                )
+        elif self.payment_method == PaymentMethod.card:
+            if self.payment_options:
+                raise ValueError("card 不需要 payment_options")
+        return self
 
 
 class CreatePaymentResponse(BaseModel):
