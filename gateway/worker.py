@@ -57,6 +57,10 @@ class WebhookDeliveryWorker:
             await asyncio.gather(
                 self._delivery_loop(),
                 self._cleanup_loop(),
+                self._renewal_expire_loop(),
+                self._renewal_scan_loop(),
+                self._renewal_grace_loop(),
+                self._renewal_reminder_loop(),
             )
         finally:
             await self.http_client.aclose()
@@ -82,6 +86,62 @@ class WebhookDeliveryWorker:
                 await self.cleanup_stale_incomplete_subscriptions()
             except Exception as exc:
                 logger.error("清理任务异常", error=str(exc), exc_info=True)
+
+    async def _renewal_expire_loop(self):
+        """Phase 0: 清理过期的 renewal payment"""
+        from gateway.services.renewal import RenewalService
+
+        await asyncio.sleep(random.uniform(0, 5))
+        while True:
+            try:
+                async with get_session_ctx() as session:
+                    svc = RenewalService(session)
+                    await svc.expire_stale_renewal_payments()
+            except Exception as exc:
+                logger.error("expire_stale_renewal_failed", error=str(exc), exc_info=True)
+            await asyncio.sleep(settings.renewal_scan_interval)
+
+    async def _renewal_scan_loop(self):
+        """Phase A: 为即将到期的订阅创建续费订单"""
+        from gateway.services.renewal import RenewalService
+
+        await asyncio.sleep(random.uniform(5, 10))
+        while True:
+            try:
+                async with get_session_ctx() as session:
+                    svc = RenewalService(session)
+                    await svc.scan_and_create_renewals()
+            except Exception as exc:
+                logger.error("renewal_scan_failed", error=str(exc), exc_info=True)
+            await asyncio.sleep(settings.renewal_scan_interval)
+
+    async def _renewal_grace_loop(self):
+        """Phase B: 到期/宽限期处理"""
+        from gateway.services.renewal import RenewalService
+
+        await asyncio.sleep(random.uniform(10, 15))
+        while True:
+            try:
+                async with get_session_ctx() as session:
+                    svc = RenewalService(session)
+                    await svc.enforce_grace_periods()
+            except Exception as exc:
+                logger.error("enforce_grace_periods_failed", error=str(exc), exc_info=True)
+            await asyncio.sleep(settings.renewal_grace_interval)
+
+    async def _renewal_reminder_loop(self):
+        """Phase C: 续费提醒重发"""
+        from gateway.services.renewal import RenewalService
+
+        await asyncio.sleep(random.uniform(15, 20))
+        while True:
+            try:
+                async with get_session_ctx() as session:
+                    svc = RenewalService(session)
+                    await svc.send_renewal_reminders()
+            except Exception as exc:
+                logger.error("send_renewal_reminders_failed", error=str(exc), exc_info=True)
+            await asyncio.sleep(settings.renewal_reminder_interval)
 
     async def process_pending_deliveries(self):
         delivery_ids: list[uuid.UUID] = []
@@ -201,7 +261,7 @@ class WebhookDeliveryWorker:
             body_bytes = _json.dumps(delivery.payload, ensure_ascii=False).encode("utf-8")
             headers = {"Content-Type": "application/json"}
             if settings.webhook_signing_secret:
-                sig = hmac.new(
+                sig = hmac.HMAC(
                     settings.webhook_signing_secret.encode("utf-8"),
                     body_bytes,
                     hashlib.sha256,

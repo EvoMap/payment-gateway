@@ -6,12 +6,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from gateway.db import get_session
 from gateway.core.auth import get_app_from_api_key
-from gateway.core.models import App, Customer, Subscription
-from gateway.core.constants import SubscriptionStatus
+from gateway.core.models import App, Subscription
+from gateway.core.constants import BillingInterval, PaymentMethod, SubscriptionStatus
 from gateway.core.schemas import (
     CreateSubscriptionRequest,
     CreateSubscriptionResponse,
@@ -56,10 +55,28 @@ async def _build_subscription_response(
         )
     ).scalar_one_or_none()
 
+    if plan:
+        plan_response = PlanResponse.model_validate(plan)
+    else:
+        plan_response = PlanResponse(
+            id=sub.plan_id,
+            slug="deleted",
+            name="(已删除的计划)",
+            description=None,
+            amount=sub.amount,
+            currency=sub.currency,
+            interval=BillingInterval.month,
+            interval_count=1,
+            tier=0,
+            features=None,
+            is_active=False,
+            created_at=sub.created_at,
+        )
+
     return SubscriptionResponse(
         id=sub.id,
         external_user_id=customer.external_user_id if customer else "",
-        plan=PlanResponse.model_validate(plan) if plan else None,
+        plan=plan_response,
         pending_plan=(
             PlanResponse.model_validate(pending_plan) if pending_plan else None
         ),
@@ -67,6 +84,9 @@ async def _build_subscription_response(
         amount=sub.amount,
         currency=sub.currency,
         status=SubscriptionStatus(sub.status),
+        payment_method=PaymentMethod(sub.payment_method),
+        renewal_payment_id=sub.renewal_payment_id,
+        grace_period_end=sub.grace_period_end,
         current_period_start=sub.current_period_start,
         current_period_end=sub.current_period_end,
         cancel_at_period_end=sub.cancel_at_period_end,
@@ -114,7 +134,7 @@ async def list_subscriptions(
     )
     items = [await _build_subscription_response(s, session) for s in subs]
     return success_response(
-        data={"total": total, "items": items}
+        data=SubscriptionListResponse(total=total, items=items).model_dump(mode="json")
     )
 
 

@@ -13,6 +13,8 @@ class PaymentMethod(str, enum.Enum):
 
 ALIPAY_SUPPORTED_CURRENCIES = frozenset({"CNY", "USD", "HKD", "EUR", "GBP"})
 
+APP_MANAGED_METHODS = frozenset({PaymentMethod.wechat_pay.value, PaymentMethod.alipay.value})
+
 
 class Currency(str, enum.Enum):
     USD = "USD"  # 美元
@@ -69,6 +71,7 @@ class RefundStatus(str, enum.Enum):
 class BillingInterval(str, enum.Enum):
     """计费周期（应用层枚举，数据库层使用 String(32) + CHECK 约束）"""
 
+    day = "day"
     week = "week"
     month = "month"
     quarter = "quarter"  # Stripe 用 month + interval_count=3 实现

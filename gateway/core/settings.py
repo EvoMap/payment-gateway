@@ -73,6 +73,16 @@ class Settings(BaseSettings):
     subscription_incomplete_cleanup_minutes: int = Field(default=120, ge=60, le=2880)
     subscription_cleanup_interval: int = Field(default=300, ge=60)
 
+    # 应用层续费配置（WeChat/Alipay 订阅）
+    renewal_scan_interval: int = Field(default=60, ge=10, description="续费扫描间隔（秒）")
+    renewal_grace_interval: int = Field(default=300, ge=60, description="宽限期检查间隔（秒）")
+    renewal_reminder_interval: int = Field(default=300, ge=60, description="续费提醒检查间隔（秒）")
+    renewal_advance_days: int = Field(default=3, ge=1, le=14, description="提前几天创建续费订单")
+    renewal_grace_period_days: int = Field(default=3, ge=1, le=14, description="到期后宽限天数")
+    renewal_max_notifications: int = Field(default=3, ge=1, le=10, description="每周期最多续费通知次数")
+    renewal_notification_interval_hours: int = Field(default=24, ge=1, description="续费通知间隔（小时）")
+    renewal_payment_expire_minutes: int = Field(default=1440, ge=30, le=4320, description="续费支付链接过期时间（分钟）")
+
     # Webhook HMAC 签名密钥 (用于对外投递 webhook 进行签名)
     webhook_signing_secret: str = ""
 

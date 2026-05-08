@@ -11,7 +11,12 @@ import pytest
 
 from gateway.core.constants import Currency, Provider, SubscriptionStatus
 from gateway.core.models import App, Customer, Plan, Subscription
-from gateway.providers.base import SubscriptionActionResult, SubscriptionCheckoutResult
+from gateway.core.schemas import PaymentTypeEnum
+from gateway.providers.base import (
+    ProviderPaymentResult,
+    SubscriptionActionResult,
+    SubscriptionCheckoutResult,
+)
 from gateway.providers.stripe import StripeAdapter
 
 
@@ -28,6 +33,14 @@ def mock_adapter():
     adapter.create_subscription_checkout.return_value = SubscriptionCheckoutResult(
         session_id="cs_test_new_789",
         checkout_url="https://checkout.stripe.com/c/pay/cs_test_new_789",
+    )
+    adapter.create_payment.return_value = ProviderPaymentResult(
+        type=PaymentTypeEnum.url,
+        payload={
+            "checkout_url": "https://checkout.stripe.com/c/pay/cs_test_pay_123",
+            "session_id": "cs_test_pay_123",
+        },
+        provider_txn_id="cs_test_pay_123",
     )
     adapter.cancel_subscription.return_value = SubscriptionActionResult(
         subscription_id="sub_test_100",

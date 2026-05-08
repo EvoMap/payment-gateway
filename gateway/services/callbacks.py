@@ -3,14 +3,16 @@ Callback 处理服务（重构：按 event_category 路由，source_type + sourc
 """
 
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB, insert as pg_insert
 
+from gateway.core.billing import calculate_period_end
 from gateway.core.constants import (
+    APP_MANAGED_METHODS,
     CallbackStatus,
     PaymentStatus,
     DeliveryStatus,
@@ -30,6 +32,8 @@ from gateway.core.models import (
     Customer,
 )
 from gateway.core.schemas import CallbackEvent
+from gateway.core.settings import get_settings
+from gateway.providers import get_adapter
 
 logger = structlog.get_logger(__name__)
 
@@ -65,6 +69,10 @@ class CallbackService:
         log.info("开始处理回调")
 
         callback = await self._upsert_callback(event)
+        if callback.status == CallbackStatus.processed:
+            log.info("回调已处理，跳过重复事件")
+            await self.session.commit()
+            return
 
         match event.event_category:
             case EventCategory.payment | None:
@@ -145,6 +153,34 @@ class CallbackService:
                 current_status=old_status.value,
                 incoming_status=new_status.value,
             )
+            # 补偿：app-managed 的 Checkout Session 可能在本地标记取消后仍成功支付。
+            # 以 provider 成功回调为准纠正本地状态，再尝试激活/续期。
+            if (
+                new_status == PaymentStatus.succeeded
+                and payment.subscription_id
+                and payment.merchant_order_no
+                and (
+                    payment.merchant_order_no.startswith("sub_init_")
+                    or payment.merchant_order_no.startswith("sub_renew_")
+                )
+            ):
+                if old_status != PaymentStatus.succeeded:
+                    payment.status = PaymentStatus.succeeded
+                    if event.provider_txn_id and not payment.provider_txn_id:
+                        payment.provider_txn_id = event.provider_txn_id
+                    if not payment.paid_at:
+                        payment.paid_at = datetime.now(UTC)
+                    await self._create_payment_webhook_delivery(
+                        payment, PaymentStatus.succeeded
+                    )
+
+                    sub_stmt = select(Subscription).where(
+                        Subscription.id == payment.subscription_id
+                    )
+                    sub_result = await self.session.execute(sub_stmt)
+                    sub_obj = sub_result.scalar_one_or_none()
+                    if sub_obj and sub_obj.is_app_managed:
+                        await self._handle_app_managed_subscription_payment(payment, log)
         elif new_status != old_status:
             payment.status = new_status
 
@@ -163,9 +199,374 @@ class CallbackService:
             if new_status in payment_terminal:
                 await self._create_payment_webhook_delivery(payment, new_status)
 
+            # App-managed 订阅：支付成功时处理订阅激活/续期
+            if (
+                new_status == PaymentStatus.succeeded
+                and payment.subscription_id
+            ):
+                sub_check_stmt = select(Subscription.payment_method).where(
+                    Subscription.id == payment.subscription_id
+                )
+                sub_check_result = await self.session.execute(sub_check_stmt)
+                pm = sub_check_result.scalar_one_or_none()
+                if pm and pm in APP_MANAGED_METHODS:
+                    await self._handle_app_managed_subscription_payment(payment, log)
+
         callback.status = CallbackStatus.processed
         callback.processed_at = datetime.now(UTC)
         await self.session.commit()
+
+    # ==================== App-Managed 订阅支付处理 ====================
+
+    async def _handle_app_managed_subscription_payment(self, payment: Payment, log):
+        """App-managed 订阅支付成功后：激活（首次）或续期（续费）"""
+        stmt = (
+            select(Subscription)
+            .where(Subscription.id == payment.subscription_id)
+            .with_for_update()
+        )
+        result = await self.session.execute(stmt)
+        subscription = result.scalar_one_or_none()
+        if not subscription or not subscription.is_app_managed:
+            return
+
+        if subscription.status == SubscriptionStatus.canceled.value:
+            refunded, refund = await self._refund_app_managed_payment_once(
+                subscription,
+                payment,
+                log,
+                reason="subscription already canceled before payment completed",
+            )
+            if refunded:
+                await self._create_subscription_webhook_delivery(
+                    subscription,
+                    "payment_after_canceled_refund_pending",
+                    f"pay_{payment.id}_after_canceled_refund_pending",
+                )
+                return
+            log.warning(
+                "app_managed_payment_after_canceled",
+                subscription_id=str(subscription.id),
+                payment_id=str(payment.id),
+                refund_id=str(refund.id) if refund else None,
+            )
+            await self._create_subscription_webhook_delivery(
+                subscription,
+                "payment_after_canceled",
+                f"pay_{payment.id}_after_canceled",
+            )
+            return
+
+        if subscription.status == SubscriptionStatus.incomplete.value:
+            # 首次支付成功 → 激活订阅
+            now = datetime.now(UTC)
+            if subscription.trial_end and subscription.trial_end > now:
+                subscription.status = SubscriptionStatus.trialing.value
+                subscription.trial_start = subscription.created_at or now
+                subscription.current_period_start = now
+                subscription.current_period_end = subscription.trial_end
+            else:
+                subscription.status = SubscriptionStatus.active.value
+                subscription.current_period_start = now
+                subscription.current_period_end = await self._calculate_period_end(
+                    now, subscription
+                )
+            subscription.last_event_at = now
+            log.info(
+                "app_managed_subscription_activated",
+                subscription_id=str(subscription.id),
+            )
+            await self._create_subscription_webhook_delivery(
+                subscription, "activated", f"pay_{payment.id}_activated"
+            )
+
+        elif (
+            subscription.renewal_payment_id == payment.id
+            or (
+                payment.merchant_order_no
+                and payment.merchant_order_no.startswith(f"sub_renew_{subscription.id}")
+                and self._renewal_order_matches_current_period(
+                    payment.merchant_order_no, subscription
+                )
+            )
+        ):
+            # 幂等性：如果该周期已被推进过，退款多余支付
+            old_period_end = subscription.current_period_end
+            if (
+                old_period_end
+                and subscription.last_renewed_period_end
+                and subscription.last_renewed_period_end >= old_period_end
+            ):
+                log.warning(
+                    "renewal_already_advanced_refunding_duplicate",
+                    subscription_id=str(subscription.id),
+                    payment_id=str(payment.id),
+                    last_renewed_period_end=str(subscription.last_renewed_period_end),
+                    current_period_end=str(old_period_end),
+                )
+                await self._refund_app_managed_payment_once(
+                    subscription,
+                    payment,
+                    log,
+                    reason="duplicate renewal payment after period already advanced",
+                )
+                await self._create_subscription_webhook_delivery(
+                    subscription,
+                    "duplicate_renewal_refund_pending",
+                    f"pay_{payment.id}_dup_refund",
+                )
+                return
+
+            # 续费支付成功 → 推进周期；若已标记周期末取消，则优先退款且不延长权益。
+            if subscription.cancel_at_period_end:
+                refund_initiated, refund = await self._refund_app_managed_payment_once(
+                    subscription,
+                    payment,
+                    log,
+                    reason="subscription canceled before renewal period started",
+                )
+
+                now_ts = datetime.now(UTC)
+                subscription.renewal_payment_id = None
+                subscription.renewal_attempts = 0
+                subscription.last_renewal_notified_at = None
+                subscription.last_event_at = now_ts
+
+                subscription.grace_period_end = None
+
+                if refund_initiated:
+                    log.info(
+                        "app_managed_renewal_refund_pending_keep_cancellation",
+                        subscription_id=str(subscription.id),
+                        payment_id=str(payment.id),
+                        refund_id=str(refund.id) if refund else None,
+                    )
+                    await self._create_subscription_webhook_delivery(
+                        subscription,
+                        "renewal_refund_pending",
+                        f"pay_{payment.id}_refund_pending",
+                    )
+                    return
+                else:
+                    # 退款未能发起时，用户已付款，推进周期并取消周期末终止以保障已付费权益。
+                    old_period_end = subscription.current_period_end or now_ts
+                    subscription.last_renewed_period_end = old_period_end
+                    subscription.current_period_start = old_period_end
+                    subscription.current_period_end = await self._calculate_period_end(
+                        old_period_end, subscription
+                    )
+                    subscription.status = SubscriptionStatus.active.value
+                    subscription.cancel_at_period_end = False
+                    log.error(
+                        "app_managed_renewal_refund_failed_keep_paid_period",
+                        subscription_id=str(subscription.id),
+                        payment_id=str(payment.id),
+                        amount=payment.amount,
+                    )
+
+                log.warning(
+                    "app_managed_renewal_paid_but_cancel_at_period_end",
+                    subscription_id=str(subscription.id),
+                    payment_id=str(payment.id),
+                    amount=payment.amount,
+                    currency=payment.currency.value if payment.currency else None,
+                    refund_initiated=refund_initiated,
+                )
+                await self._create_subscription_webhook_delivery(
+                    subscription,
+                    "renewal_paid_needs_refund",
+                    f"pay_{payment.id}_needs_refund",
+                )
+                return
+            now = datetime.now(UTC)
+            old_period_end = subscription.current_period_end or now
+
+            # 如果有 pending plan change，使用新计划
+            if subscription.pending_plan_id:
+                new_plan = await self.session.get(Plan, subscription.pending_plan_id)
+                if new_plan:
+                    subscription.plan_id = new_plan.id
+                    subscription.amount = new_plan.amount
+                    subscription.currency = new_plan.currency
+                    subscription.provider_price_id = new_plan.provider_price_id
+                subscription.pending_plan_id = None
+                subscription.pending_plan_change_at = None
+
+            subscription.last_renewed_period_end = old_period_end
+            subscription.current_period_start = old_period_end
+            subscription.current_period_end = await self._calculate_period_end(
+                old_period_end, subscription
+            )
+            subscription.status = SubscriptionStatus.active.value
+            subscription.grace_period_end = None
+            subscription.last_event_at = now
+
+            # 取消冗余的 pending renewal payment（防止双重扣费）
+            if (
+                subscription.renewal_payment_id
+                and subscription.renewal_payment_id != payment.id
+            ):
+                stale_payment = await self.session.get(
+                    Payment, subscription.renewal_payment_id
+                )
+                if stale_payment and stale_payment.status == PaymentStatus.pending:
+                    if stale_payment.provider_txn_id:
+                        try:
+                            adapter = get_adapter(subscription.provider)
+                            await adapter.cancel_payment(
+                                merchant_order_no=stale_payment.merchant_order_no,
+                                provider_txn_id=stale_payment.provider_txn_id,
+                            )
+                        except Exception as cancel_err:
+                            log.warning(
+                                "cancel_stale_renewal_after_advance_failed",
+                                stale_payment_id=str(stale_payment.id),
+                                error=str(cancel_err),
+                            )
+                    stale_payment.status = PaymentStatus.canceled
+
+            subscription.renewal_payment_id = None
+            subscription.renewal_attempts = 0
+            subscription.last_renewal_notified_at = None
+            log.info(
+                "app_managed_subscription_renewed",
+                subscription_id=str(subscription.id),
+                new_period_end=str(subscription.current_period_end),
+            )
+            await self._create_subscription_webhook_delivery(
+                subscription, "renewed", f"pay_{payment.id}_renewed"
+            )
+        else:
+            # 双重支付场景：payment succeeded 但无法匹配当前周期，主动退款
+            if payment.status == PaymentStatus.succeeded and subscription.last_renewed_period_end:
+                log.warning(
+                    "app_managed_payment_unmatched_attempting_refund",
+                    subscription_id=str(subscription.id),
+                    payment_id=str(payment.id),
+                    subscription_status=subscription.status,
+                )
+                await self._refund_app_managed_payment_once(
+                    subscription,
+                    payment,
+                    log,
+                    reason="duplicate renewal payment after period already advanced",
+                )
+                await self._create_subscription_webhook_delivery(
+                    subscription,
+                    "duplicate_payment_refund_pending",
+                    f"pay_{payment.id}_duplicate_refund",
+                )
+            else:
+                log.warning(
+                    "app_managed_payment_unmatched",
+                    subscription_id=str(subscription.id),
+                    payment_id=str(payment.id),
+                    subscription_status=subscription.status,
+                )
+
+    async def _refund_app_managed_payment_once(
+        self,
+        subscription: Subscription,
+        payment: Payment,
+        log,
+        *,
+        reason: str,
+    ) -> tuple[bool, Refund | None]:
+        existing_stmt = (
+            select(Refund)
+            .where(Refund.payment_id == payment.id)
+            .order_by(Refund.created_at.desc())
+            .limit(1)
+        )
+        existing = (await self.session.execute(existing_stmt)).scalar_one_or_none()
+        if existing:
+            log.info(
+                "app_managed_auto_refund_already_exists",
+                subscription_id=str(subscription.id),
+                payment_id=str(payment.id),
+                refund_id=str(existing.id),
+            )
+            return True, existing
+
+        if not payment.provider_txn_id:
+            log.warning(
+                "app_managed_auto_refund_impossible_no_txn_id",
+                subscription_id=str(subscription.id),
+                payment_id=str(payment.id),
+            )
+            return False, None
+
+        try:
+            adapter = get_adapter(subscription.provider)
+            refund_result = await adapter.create_refund(
+                txn_id=payment.provider_txn_id,
+                merchant_order_no=payment.merchant_order_no,
+                refund_amount=payment.amount,
+                reason=reason,
+            )
+            provider_refund_id = None
+            if isinstance(refund_result, dict):
+                provider_refund_id = (
+                    refund_result.get("provider_refund_id")
+                    or refund_result.get("refund_id")
+                )
+            refund = Refund(
+                id=uuid.uuid4(),
+                payment_id=payment.id,
+                refund_amount=payment.amount,
+                reason=reason,
+                status=RefundStatus.pending,
+                provider=subscription.provider,
+                provider_refund_id=provider_refund_id,
+                notify_url=subscription.notify_url,
+            )
+            self.session.add(refund)
+            log.info(
+                "app_managed_auto_refund_initiated",
+                subscription_id=str(subscription.id),
+                payment_id=str(payment.id),
+                refund_id=str(refund.id),
+                amount=payment.amount,
+            )
+            return True, refund
+        except Exception as e:
+            log.error(
+                "app_managed_auto_refund_failed",
+                subscription_id=str(subscription.id),
+                payment_id=str(payment.id),
+                error=str(e),
+                exc_info=True,
+            )
+            return False, None
+
+    async def _calculate_period_end(
+        self, start: "datetime", subscription: Subscription
+    ) -> "datetime":
+        """根据订阅关联 plan 的 interval 计算下一个 period_end"""
+        plan = await self.session.get(Plan, subscription.plan_id)
+        if plan:
+            return calculate_period_end(start, plan.interval, plan.interval_count)
+        logger.error(
+            "subscription_plan_not_found_using_monthly_fallback",
+            subscription_id=str(subscription.id),
+            plan_id=str(subscription.plan_id),
+        )
+        return calculate_period_end(start, "month", 1)
+
+    @staticmethod
+    def _renewal_order_matches_current_period(
+        merchant_order_no: str, subscription: Subscription
+    ) -> bool:
+        """验证 renewal payment 的 merchant_order_no 中嵌入的 period_end 时间戳
+        与订阅当前 current_period_end 匹配，防止旧周期延迟回调错误推进。"""
+        if not subscription.current_period_end:
+            return False
+        current_ts = str(int(subscription.current_period_end.timestamp()))
+        prefix = f"sub_renew_{subscription.id}_"
+        suffix = merchant_order_no.removeprefix(prefix) if merchant_order_no.startswith(prefix) else ""
+        # suffix 格式: "{ts}" 或 "{ts}_r{n}"
+        ts_part = suffix.split("_")[0] if suffix else ""
+        return ts_part == current_ts
 
     # ==================== 退款回调 ====================
 
@@ -626,8 +1027,59 @@ class CallbackService:
             )
             if event.app_id:
                 stmt = stmt.where(Payment.app_id == event.app_id)
+            stmt = stmt.order_by(Payment.created_at.desc()).limit(1)
             result = await self.session.execute(stmt)
-            return result.scalar_one_or_none()
+            payment = result.scalar_one_or_none()
+            if payment:
+                return payment
+
+            # 回退：在 app-managed 订阅的 _internal.old_renewal_txn_ids 中查找旧 session ID
+            # 依赖 SQLAlchemy 2.0+ 的 JSONB 链式下标语法；meta 为 NULL 时路径返回 NULL 不匹配
+            # 仅在 app_id 已知时执行，防止跨租户误匹配
+            if not event.app_id:
+                return None
+            _settings = get_settings()
+            txn_id_json = func.cast(
+                func.jsonb_build_array(event.provider_txn_id), PG_JSONB
+            )
+            lookback = datetime.now(UTC) - timedelta(
+                minutes=_settings.renewal_payment_expire_minutes * 2
+            )
+            fallback_filters = [
+                Subscription.app_id == event.app_id,
+                Subscription.payment_method.in_(APP_MANAGED_METHODS),
+                Subscription.last_renewal_notified_at >= lookback,
+                Subscription.meta["_internal"]["old_renewal_txn_ids"]
+                .cast(PG_JSONB)
+                .contains(txn_id_json),
+            ]
+            stmt = (
+                select(Subscription)
+                .where(*fallback_filters)
+                .order_by(Subscription.last_renewal_notified_at.desc())
+                .limit(1)
+            )
+            result = await self.session.execute(stmt)
+            sub = result.scalar_one_or_none()
+            if sub:
+                # 找到与旧 provider_txn_id 对应的原始 Payment（已被标记为 canceled）
+                orig_stmt = (
+                    select(Payment)
+                    .where(
+                        Payment.subscription_id == sub.id,
+                        Payment.provider_txn_id == event.provider_txn_id,
+                    )
+                    .limit(1)
+                )
+                orig_result = await self.session.execute(orig_stmt)
+                orig_payment = orig_result.scalar_one_or_none()
+                if orig_payment:
+                    return orig_payment
+                logger.warning(
+                    "old_renewal_txn_id_matched_but_payment_not_found",
+                    provider_txn_id=event.provider_txn_id,
+                    subscription_id=str(sub.id),
+                )
 
         return None
 

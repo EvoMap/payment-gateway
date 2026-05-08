@@ -290,7 +290,7 @@ class CreatePlanRequest(BaseModel):
     slug: str = Field(..., min_length=1, max_length=64)
     name: str = Field(..., min_length=1, max_length=100)
     description: str | None = None
-    amount: int = Field(..., gt=0)
+    amount: int = Field(..., ge=0)
     currency: Currency
     interval: BillingInterval
     interval_count: int = Field(default=1, ge=1)
@@ -342,6 +342,41 @@ class CreateSubscriptionRequest(BaseModel):
     trial_period_days: int | None = Field(None, ge=1, le=365)
     metadata: dict | None = None
     force_cleanup: bool = False
+    payment_method: PaymentMethod = Field(
+        default=PaymentMethod.card,
+        description="支付方式。默认 card（走 Stripe 订阅），wechat_pay/alipay 走应用层续费",
+    )
+    payment_options: dict[str, Any] | None = Field(
+        None,
+        description="支付方式选项（如 wechat_pay 需 {\"client\": \"web\"}）",
+    )
+
+    @model_validator(mode="after")
+    def validate_reserved_metadata(self) -> "CreateSubscriptionRequest":
+        if self.metadata and "_internal" in self.metadata:
+            raise ValueError("metadata top-level key '_internal' is reserved for system use and cannot be set by the caller")
+        return self
+
+    @model_validator(mode="after")
+    def validate_subscription_payment_options(self) -> "CreateSubscriptionRequest":
+        if self.payment_options and self.payment_method == PaymentMethod.card:
+            raise ValueError("payment_options requires payment_method to be wechat_pay or alipay")
+        if self.payment_method == PaymentMethod.wechat_pay:
+            opts = self.payment_options or {}
+            allowed_keys = {"client"}
+            extra = set(opts.keys()) - allowed_keys
+            if extra:
+                raise ValueError(
+                    f"wechat_pay payment_options only supports {allowed_keys}, unexpected keys: {extra}"
+                )
+            client = opts.get("client")
+            if client is not None:
+                if not isinstance(client, str) or client not in ("web", "ios", "android"):
+                    raise ValueError("payment_options.client must be a string, one of: web, ios, android")
+        elif self.payment_method == PaymentMethod.alipay:
+            if self.payment_options:
+                raise ValueError("alipay does not accept payment_options")
+        return self
 
 
 class CreateSubscriptionResponse(BaseModel):
@@ -359,6 +394,9 @@ class SubscriptionResponse(BaseModel):
     amount: int
     currency: Currency
     status: SubscriptionStatus
+    payment_method: PaymentMethod
+    renewal_payment_id: UUID | None = None
+    grace_period_end: datetime | None = None
     current_period_start: datetime | None
     current_period_end: datetime | None
     cancel_at_period_end: bool

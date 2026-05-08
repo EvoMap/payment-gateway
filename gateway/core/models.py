@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from gateway.core.constants import (
+    APP_MANAGED_METHODS,
     CallbackStatus,
     Currency,
     DeliveryStatus,
@@ -150,7 +151,7 @@ class Plan(Base):
             "app_id", "provider_product_id", name="uq_plans_app_provider_product_id"
         ),
         CheckConstraint(
-            "interval IN ('week', 'month', 'quarter', 'year')",
+            "interval IN ('day', 'week', 'month', 'quarter', 'year')",
             name="ck_plans_interval_valid",
         ),
     )
@@ -190,7 +191,7 @@ class Plan(Base):
         comment="币种",
     )
     interval: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="计费周期（week/month/quarter/year）"
+        String(32), nullable=False, comment="计费周期（day/week/month/quarter/year）"
     )
     interval_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, comment="间隔数"
@@ -242,6 +243,21 @@ class Subscription(Base):
         Index("ix_subscriptions_customer_status", "customer_id", "status"),
         Index("ix_subscriptions_provider_sub_id", "provider_subscription_id"),
         Index("ix_subscriptions_app_created_at", "app_id", "created_at"),
+        Index(
+            "ix_subscriptions_renewal_scan",
+            "current_period_end",
+            postgresql_where=text("payment_method IN ('wechat_pay', 'alipay') "
+            "AND status = 'active' "
+            "AND cancel_at_period_end = FALSE "
+            "AND renewal_payment_id IS NULL"),
+        ),
+        Index(
+            "ix_subscriptions_grace_period",
+            "grace_period_end",
+            postgresql_where=text("payment_method IN ('wechat_pay', 'alipay') "
+            "AND status = 'past_due' "
+            "AND grace_period_end IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -339,6 +355,37 @@ class Subscription(Base):
         comment="渠道侧 Schedule ID（如 Stripe sub_sched_xxx）",
     )
 
+    # 应用层续费字段（WeChat/Alipay 订阅）
+    payment_method: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="card",
+        comment="支付方式（card/wechat_pay/alipay），决定计费管理模式",
+    )
+    renewal_payment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "payments.id",
+            ondelete="SET NULL",
+            name="fk_subscriptions_renewal_payment_id",
+            use_alter=True,
+        ),
+        nullable=True,
+        comment="当前待支付的续费订单ID（防重复创建）",
+    )
+    grace_period_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="宽限期截止时间"
+    )
+    renewal_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+        comment="当前周期已发送续费通知次数",
+    )
+    last_renewal_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="上次发送续费通知时间"
+    )
+    last_renewed_period_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="上次续费推进时的 period_end（幂等性防重复推进）",
+    )
+
     notify_url: Mapped[str | None] = mapped_column(
         String(2048), nullable=True, comment="订阅事件回调地址"
     )
@@ -366,6 +413,13 @@ class Subscription(Base):
         back_populates="subscriptions", foreign_keys=[plan_id]
     )
     pending_plan: Mapped["Plan | None"] = relationship(foreign_keys=[pending_plan_id])
+    renewal_payment: Mapped["Payment | None"] = relationship(
+        foreign_keys=[renewal_payment_id]
+    )
+
+    @property
+    def is_app_managed(self) -> bool:
+        return self.payment_method in APP_MANAGED_METHODS
 
 
 class Payment(Base):

@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from gateway.core.constants import SubscriptionStatus
+from gateway.core.constants import PaymentMethod, SubscriptionStatus
 from gateway.core.exceptions import (
     BadRequestException,
     ConflictException,
@@ -57,6 +57,7 @@ class TestCreateSubscription:
         assert sub.currency == basic_plan.currency
         assert sub.cancel_at_period_end is False
         assert sub.provider_checkout_session_id == "cs_test_new_789"
+        assert sub.last_event_at is None
         assert "cs_test_new_789" in checkout_url
 
         adapter = patch_deps
@@ -82,6 +83,52 @@ class TestCreateSubscription:
         # trial_end 应在 ~14 天后
         delta = sub.trial_end - datetime.now(UTC)
         assert 13 <= delta.days <= 14
+
+    async def test_app_managed_trial_starts_without_initial_payment(
+        self, session, test_app, basic_plan, patch_deps
+    ):
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="wechat_trial_user",
+            plan_id=basic_plan.id,
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+            trial_period_days=7,
+            payment_method=PaymentMethod.wechat_pay,
+            payment_options={"client": "web"},
+        )
+
+        sub, checkout_url = await svc.create_subscription(test_app, req)
+
+        assert checkout_url == ""
+        assert sub.status == SubscriptionStatus.trialing.value
+        assert sub.current_period_end == sub.trial_end
+        patch_deps.create_payment.assert_not_called()
+
+        payments = (
+            await session.execute(
+                select(Payment).where(Payment.subscription_id == sub.id)
+            )
+        ).scalars().all()
+        assert payments == []
+
+    async def test_app_managed_alipay_rejects_unsupported_plan_currency(
+        self, session, test_app, basic_plan, patch_deps
+    ):
+        basic_plan.currency = Currency.JPY
+        await session.flush()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="alipay_jpy_user",
+            plan_id=basic_plan.id,
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+            payment_method=PaymentMethod.alipay,
+        )
+
+        with pytest.raises(BadRequestException, match="alipay 仅支持"):
+            await svc.create_subscription(test_app, req)
 
     async def test_create_inactive_plan_rejected(
         self, session, test_app, basic_plan, patch_deps
@@ -117,15 +164,37 @@ class TestCreateSubscription:
         with pytest.raises(BadRequestException, match="渠道同步"):
             await svc.create_subscription(test_app, req)
 
+    async def test_create_app_managed_without_provider_price_allowed(
+        self, session, test_app, basic_plan, patch_deps
+    ):
+        basic_plan.provider_price_id = None
+        await session.flush()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="wechat_user",
+            plan_id=basic_plan.id,
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+            payment_method=PaymentMethod.wechat_pay,
+            payment_options={"client": "web"},
+        )
+
+        sub, checkout_url = await svc.create_subscription(test_app, req)
+
+        assert sub.payment_method == PaymentMethod.wechat_pay.value
+        assert sub.provider_price_id is None
+        assert sub.last_event_at is None
+        assert "cs_test_pay_123" in checkout_url
+        patch_deps.create_payment.assert_called_once()
+
     async def test_create_duplicate_incomplete_rejected(
         self, session, test_app, basic_plan, incomplete_subscription, patch_deps
     ):
         """已有 incomplete 订阅时不允许再次创建。"""
         svc = SubscriptionService(session)
         req = CreateSubscriptionRequest(
-            external_user_id=incomplete_subscription.customer.external_user_id
-            if hasattr(incomplete_subscription, "customer")
-            else "test_user_001",
+            external_user_id="test_user_001",
             plan_id=basic_plan.id,
             success_url="https://example.com/success",
             cancel_url="https://example.com/cancel",
@@ -695,5 +764,7 @@ class TestQueries:
         assert any(s.id == active_subscription.id for s in subs)
 
 
+from sqlalchemy import select  # noqa: E402
+
 from gateway.core.constants import Currency, Provider  # noqa: E402
-from gateway.core.models import Customer, Plan, Subscription  # noqa: E402
+from gateway.core.models import Customer, Payment, Plan, Subscription  # noqa: E402

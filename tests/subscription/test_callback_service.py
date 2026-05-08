@@ -7,16 +7,18 @@ CallbackService 订阅回调单元测试
 
 import uuid
 from datetime import datetime, timedelta, UTC
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
 
 from gateway.core.constants import (
     EventCategory,
+    PaymentStatus,
     Provider,
     SubscriptionStatus,
 )
-from gateway.core.models import Payment, Subscription, WebhookDelivery
+from gateway.core.models import Payment, Refund, Subscription, WebhookDelivery
 from gateway.core.schemas import CallbackEvent
 from gateway.services.callbacks import CallbackService
 
@@ -39,15 +41,19 @@ def _make_event(
     event_created: int | None = None,
     provider_event_id: str | None = None,
     invoice_id: str | None = None,
+    provider_txn_id: str | None = None,
+    merchant_order_no: str | None = None,
+    app_id: uuid.UUID | None = None,
 ) -> CallbackEvent:
     now_ts = event_created or _ts(datetime.now(UTC))
     return CallbackEvent(
         provider=Provider.stripe,
         provider_event_id=provider_event_id or f"evt_{uuid.uuid4().hex[:12]}",
-        provider_txn_id=subscription_id,
-        merchant_order_no=None,
+        provider_txn_id=provider_txn_id if provider_txn_id is not None else subscription_id,
+        merchant_order_no=merchant_order_no,
         outcome=outcome,
         event_category=category,
+        app_id=app_id,
         subscription_id=subscription_id,
         checkout_session_id=checkout_session_id,
         gateway_subscription_id=gateway_subscription_id,
@@ -480,7 +486,168 @@ class TestInvoicePaymentFailed:
 
 
 # =====================================================================
-#  8. subscription_paused / subscription_resumed
+#  8. app-managed payment callbacks
+# =====================================================================
+
+
+class TestAppManagedPaymentCallbacks:
+    async def test_canceled_old_renewal_payment_success_still_renews(
+        self, session, active_subscription, test_app
+    ):
+        period_end = active_subscription.current_period_end
+        assert period_end is not None
+
+        active_subscription.payment_method = "wechat_pay"
+        old_payment = Payment(
+            id=uuid.uuid4(),
+            app_id=test_app.id,
+            merchant_order_no=f"sub_renew_{active_subscription.id}_{_ts(period_end)}",
+            provider=Provider.stripe,
+            amount=active_subscription.amount,
+            currency=active_subscription.currency,
+            status=PaymentStatus.canceled,
+            provider_txn_id="cs_old_renewal",
+            subscription_id=active_subscription.id,
+        )
+        new_payment = Payment(
+            id=uuid.uuid4(),
+            app_id=test_app.id,
+            merchant_order_no=f"sub_renew_{active_subscription.id}_{_ts(period_end)}_r2",
+            provider=Provider.stripe,
+            amount=active_subscription.amount,
+            currency=active_subscription.currency,
+            status=PaymentStatus.pending,
+            provider_txn_id="cs_new_renewal",
+            subscription_id=active_subscription.id,
+        )
+        active_subscription.renewal_payment_id = new_payment.id
+        session.add_all([old_payment, new_payment])
+        await session.flush()
+
+        event = _make_event(
+            outcome="succeeded",
+            category=EventCategory.payment,
+            provider_txn_id="cs_old_renewal",
+            merchant_order_no=old_payment.merchant_order_no,
+            app_id=test_app.id,
+        )
+
+        svc = CallbackService(session)
+        await svc.process_callback(event)
+
+        await session.refresh(active_subscription)
+        await session.refresh(old_payment)
+        assert old_payment.status == PaymentStatus.succeeded
+        assert active_subscription.last_renewed_period_end == period_end
+        assert active_subscription.current_period_start == period_end
+        assert active_subscription.current_period_end > period_end
+        assert active_subscription.renewal_payment_id is None
+
+    async def test_cancel_at_period_end_renewal_refund_does_not_extend_period(
+        self, session, active_subscription, test_app
+    ):
+        period_end = active_subscription.current_period_end
+        assert period_end is not None
+
+        active_subscription.payment_method = "wechat_pay"
+        active_subscription.cancel_at_period_end = True
+        payment = Payment(
+            id=uuid.uuid4(),
+            app_id=test_app.id,
+            merchant_order_no=f"sub_renew_{active_subscription.id}_{_ts(period_end)}",
+            provider=Provider.stripe,
+            amount=active_subscription.amount,
+            currency=active_subscription.currency,
+            status=PaymentStatus.pending,
+            provider_txn_id="cs_refund_renewal",
+            subscription_id=active_subscription.id,
+        )
+        active_subscription.renewal_payment_id = payment.id
+        session.add(payment)
+        await session.flush()
+
+        adapter = AsyncMock()
+        adapter.create_refund.return_value = {
+            "refund_id": "re_auto_renewal",
+            "status": "pending",
+        }
+        event = _make_event(
+            outcome="succeeded",
+            category=EventCategory.payment,
+            provider_txn_id="cs_refund_renewal",
+            merchant_order_no=payment.merchant_order_no,
+            app_id=test_app.id,
+        )
+
+        with patch("gateway.services.callbacks.get_adapter", return_value=adapter):
+            svc = CallbackService(session)
+            await svc.process_callback(event)
+
+        await session.refresh(active_subscription)
+        assert active_subscription.current_period_end == period_end
+        assert active_subscription.cancel_at_period_end is True
+        assert active_subscription.renewal_payment_id is None
+
+        refund = (
+            await session.execute(
+                select(Refund).where(Refund.payment_id == payment.id)
+            )
+        ).scalar_one()
+        assert refund.provider_refund_id == "re_auto_renewal"
+
+    async def test_duplicate_cancel_at_period_end_success_refunds_once(
+        self, session, active_subscription, test_app
+    ):
+        period_end = active_subscription.current_period_end
+        assert period_end is not None
+
+        active_subscription.payment_method = "wechat_pay"
+        active_subscription.cancel_at_period_end = True
+        payment = Payment(
+            id=uuid.uuid4(),
+            app_id=test_app.id,
+            merchant_order_no=f"sub_renew_{active_subscription.id}_{_ts(period_end)}",
+            provider=Provider.stripe,
+            amount=active_subscription.amount,
+            currency=active_subscription.currency,
+            status=PaymentStatus.pending,
+            provider_txn_id="cs_duplicate_refund",
+            subscription_id=active_subscription.id,
+        )
+        active_subscription.renewal_payment_id = payment.id
+        session.add(payment)
+        await session.flush()
+
+        adapter = AsyncMock()
+        adapter.create_refund.return_value = {
+            "refund_id": "re_duplicate_once",
+            "status": "pending",
+        }
+        event = _make_event(
+            outcome="succeeded",
+            category=EventCategory.payment,
+            provider_event_id="evt_duplicate_refund",
+            provider_txn_id="cs_duplicate_refund",
+            merchant_order_no=payment.merchant_order_no,
+            app_id=test_app.id,
+        )
+
+        with patch("gateway.services.callbacks.get_adapter", return_value=adapter):
+            svc = CallbackService(session)
+            await svc.process_callback(event)
+            await svc.process_callback(event)
+
+        adapter.create_refund.assert_awaited_once()
+        refunds = (
+            await session.execute(
+                select(Refund).where(Refund.payment_id == payment.id)
+            )
+        ).scalars().all()
+        assert len(refunds) == 1
+
+
+# =====================================================================
+#  9. subscription_paused / subscription_resumed
 # =====================================================================
 
 
