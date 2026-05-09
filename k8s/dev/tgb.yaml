@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-payment-gateway-dev-payment-gateway
+  namespace: envoy-gateway-system
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/component: proxy
+    app.kubernetes.io/managed-by: envoy-gateway
+    app.kubernetes.io/name: envoy
+    gateway.envoyproxy.io/owning-gateway-name: payment-gateway
+    gateway.envoyproxy.io/owning-gateway-namespace: payment-gateway-dev
+  ports:
+    - name: http-80
+      port: 80
+      protocol: TCP
+      targetPort: 10080
+
+---
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: envoy-payment-gateway-dev-payment-gateway
+  namespace: envoy-gateway-system
+spec:
+  serviceRef:
+    name: envoy-payment-gateway-dev-payment-gateway
+    port: 80
+  targetGroupARN: "arn:aws:elasticloadbalancing:us-east-2:493919098970:targetgroup/payment-gateway-dev/288e6998d30953ab"
+  targetType: ip
+  vpcID: vpc-06e807567a8a1d2ed

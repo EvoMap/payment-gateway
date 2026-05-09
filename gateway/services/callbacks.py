@@ -1289,6 +1289,7 @@ class CallbackService:
                 "status": subscription.status,
                 "amount": subscription.amount,
                 "currency": subscription.currency.value,
+                "payment_method": subscription.payment_method,
                 "current_period_start": (
                     subscription.current_period_start.isoformat()
                     if subscription.current_period_start

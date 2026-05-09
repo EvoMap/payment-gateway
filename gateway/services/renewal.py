@@ -564,6 +564,9 @@ class RenewalService:
             raise
 
         # 发送 webhook 通知商户
+        checkout_expires_at = (
+            datetime.now(UTC) + timedelta(minutes=self.settings.renewal_payment_expire_minutes)
+        ).isoformat()
         await self._create_renewal_webhook(
             sub,
             "renewal_created",
@@ -574,6 +577,7 @@ class RenewalService:
                 if sub.current_period_end
                 else None
             ),
+            checkout_expires_at=checkout_expires_at,
         )
 
         log.info(
@@ -705,12 +709,16 @@ class RenewalService:
                     error=str(cancel_err),
                 )
 
+        checkout_expires_at = (
+            datetime.now(UTC) + timedelta(minutes=self.settings.renewal_payment_expire_minutes)
+        ).isoformat()
         await self._create_renewal_webhook(
             sub,
             "renewal_reminder",
             checkout_url=checkout_url,
             payment_id=str(new_payment_id),
             attempt_number=sub.renewal_attempts,
+            checkout_expires_at=checkout_expires_at,
         )
 
         log.info(

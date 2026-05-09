@@ -1,0 +1,63 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: payment-gateway-proxy-config
+  namespace: payment-gateway-dev
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: 1
+        pod: {}
+      envoyService:
+        type: ClusterIP
+  shutdown:
+    drainTimeout: 30s
+    minDrainDuration: 5s
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: payment-gateway
+  namespace: payment-gateway-dev
+spec:
+  gatewayClassName: eg
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: payment-gateway-proxy-config
+  listeners:
+    - name: listener-http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: payment-gateway-default
+  namespace: payment-gateway-dev
+spec:
+  parentRefs:
+    - name: payment-gateway
+      sectionName: listener-http
+  rules:
+    - backendRefs:
+        - name: api
+          port: 8000
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            add:
+              - name: X-Frame-Options
+                value: DENY
+              - name: X-Content-Type-Options
+                value: nosniff
+              - name: X-XSS-Protection
+                value: "1; mode=block"
