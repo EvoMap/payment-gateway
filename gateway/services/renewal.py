@@ -506,6 +506,17 @@ class RenewalService:
             log.error("renewal_no_notify_url_skipping")
             return
 
+        # Pre-fill customer email on the hosted Checkout page (alipay /
+        # wechat_pay use mode=payment which doesn't bind to Stripe Customer).
+        renewal_metadata = {
+            "subscription_id": str(sub.id),
+            "app_id": str(sub.app_id),
+            "renewal": "true",
+        }
+        customer = await self.session.get(Customer, sub.customer_id)
+        if customer and customer.email:
+            renewal_metadata["customer_email"] = customer.email
+
         payment_result = await adapter.create_payment(
             currency=currency.value,
             merchant_order_no=merchant_order_no,
@@ -517,11 +528,7 @@ class RenewalService:
             payment_options=stored_payment_options,
             success_url=success_url,
             cancel_url=cancel_url,
-            metadata={
-                "subscription_id": str(sub.id),
-                "app_id": str(sub.app_id),
-                "renewal": "true",
-            },
+            metadata=renewal_metadata,
             app_id=str(sub.app_id),
             expire_minutes=self.settings.renewal_payment_expire_minutes,
         )
@@ -624,6 +631,16 @@ class RenewalService:
             log.error("renewal_reminder_no_notify_url_skipping")
             return
 
+        # Pre-fill customer email (same rationale as _create_renewal_for_subscription).
+        reminder_metadata = {
+            "subscription_id": str(sub.id),
+            "app_id": str(sub.app_id),
+            "renewal": "true",
+        }
+        customer = await self.session.get(Customer, sub.customer_id)
+        if customer and customer.email:
+            reminder_metadata["customer_email"] = customer.email
+
         # 先创建新 payment，成功后再 cancel 旧的（避免 cancel 不可逆导致用户无法续费）
         payment_result = await adapter.create_payment(
             currency=old_payment.currency.value,
@@ -636,11 +653,7 @@ class RenewalService:
             payment_options=stored_payment_options,
             success_url=success_url,
             cancel_url=cancel_url,
-            metadata={
-                "subscription_id": str(sub.id),
-                "app_id": str(sub.app_id),
-                "renewal": "true",
-            },
+            metadata=reminder_metadata,
             app_id=str(sub.app_id),
             expire_minutes=self.settings.renewal_payment_expire_minutes,
         )

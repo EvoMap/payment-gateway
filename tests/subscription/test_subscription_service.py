@@ -183,7 +183,9 @@ class TestCreateSubscription:
         # Regression: alipay/wechat_pay (app-managed) must forward req.email
         # into adapter.create_payment(metadata=...) so Stripe Checkout can
         # pre-fill the email field on the hosted payment page.
-        basic_plan.currency = Currency.CNY
+        basic_plan.currency = __import__(
+            "gateway.core.constants", fromlist=["Currency"]
+        ).Currency.CNY
         await session.flush()
 
         svc = SubscriptionService(session)
@@ -204,12 +206,59 @@ class TestCreateSubscription:
         assert metadata["subscription_id"]
         assert metadata["app_id"]
 
+    async def test_stripe_create_payment_keeps_customer_email_out_of_metadata(self):
+        # Regression for PII risk: customer_email is forwarded to Stripe via
+        # the dedicated session_data["customer_email"] field, but it must NOT
+        # be copied into session_data["metadata"] (Stripe guidance: keep PII
+        # out of metadata).
+        from unittest.mock import AsyncMock, MagicMock, patch as patch_obj
+        import stripe as _stripe
+        from gateway.providers.stripe import StripeAdapter
+        from gateway.core.constants import PaymentMethod
+
+        adapter = StripeAdapter()
+        fake_session = MagicMock(id="cs_test_unit", url="https://stripe.test/cs")
+        with patch_obj.object(
+            _stripe.checkout.Session,
+            "create_async",
+            new=AsyncMock(return_value=fake_session),
+        ) as create_mock:
+            await adapter.create_payment(
+                currency="CNY",
+                merchant_order_no="unit_001",
+                quantity=1,
+                unit_amount=9900,
+                product_name="Unit",
+                notify_url="https://example.com/n",
+                payment_method=PaymentMethod.alipay,
+                payment_options=None,
+                success_url="https://example.com/s",
+                cancel_url="https://example.com/c",
+                metadata={
+                    "subscription_id": "sub_x",
+                    "app_id": "app_x",
+                    "customer_email": "pii@example.com",
+                },
+                app_id="app_x",
+                expire_minutes=30,
+            )
+        kwargs = create_mock.call_args.kwargs
+        assert kwargs["customer_email"] == "pii@example.com"
+        # PII must not bleed into metadata or payment_intent_data.metadata
+        assert "customer_email" not in kwargs["metadata"]
+        assert "customer_email" not in kwargs["payment_intent_data"]["metadata"]
+        # The non-PII business keys are still forwarded
+        assert kwargs["metadata"]["subscription_id"] == "sub_x"
+        assert kwargs["metadata"]["app_id"] == "app_x"
+
     async def test_app_managed_omits_customer_email_when_request_lacks_it(
         self, session, test_app, basic_plan, patch_deps, mock_adapter
     ):
         # Without req.email we must NOT inject a None / empty customer_email
         # key — keeping the metadata minimal avoids polluting Stripe metadata.
-        basic_plan.currency = Currency.CNY
+        basic_plan.currency = __import__(
+            "gateway.core.constants", fromlist=["Currency"]
+        ).Currency.CNY
         await session.flush()
 
         svc = SubscriptionService(session)
@@ -294,11 +343,13 @@ class TestCreateSubscription:
 
         mock_adapter.update_customer_email.assert_not_called()
 
-    async def test_existing_customer_provider_sync_failure_is_non_fatal(
+    async def test_existing_customer_provider_sync_failure_keeps_old_email(
         self, session, test_app, basic_plan, patch_deps, mock_adapter
     ):
-        # Provider call failure must not block the subscribe flow; the local
-        # row should still be updated so subsequent retries can re-sync.
+        # Provider call failure must not block the subscribe flow, but the
+        # local email must NOT advance — otherwise subsequent subscribes see
+        # matching emails and never retry the sync, leaving the provider
+        # permanently stale.
         from gateway.core.models import Customer
         from gateway.core.constants import Provider
 
@@ -326,6 +377,41 @@ class TestCreateSubscription:
 
         sub, _ = await svc.create_subscription(test_app, req)
         assert sub is not None
+        await session.refresh(existing)
+        assert existing.email == "old@example.com"  # stays retriable
+
+    async def test_existing_customer_not_implemented_advances_local_email(
+        self, session, test_app, basic_plan, patch_deps, mock_adapter
+    ):
+        # When the provider explicitly does not support email sync (raises
+        # NotImplementedError), there's no point keeping the local row stale —
+        # advance it so the diff doesn't trigger a useless call every time.
+        from gateway.core.models import Customer
+        from gateway.core.constants import Provider
+
+        existing = Customer(
+            id=uuid.uuid4(),
+            app_id=test_app.id,
+            provider=Provider.stripe,
+            external_user_id="not_impl_user",
+            provider_customer_id="cus_existing_004",
+            email="old@example.com",
+        )
+        session.add(existing)
+        await session.flush()
+
+        mock_adapter.update_customer_email.side_effect = NotImplementedError()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="not_impl_user",
+            plan_id=basic_plan.id,
+            email="new@example.com",
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+        )
+
+        await svc.create_subscription(test_app, req)
         await session.refresh(existing)
         assert existing.email == "new@example.com"
 

@@ -95,14 +95,22 @@ class SubscriptionService:
         if customer:
             if req.email and customer.email != req.email:
                 # Sync to provider so Checkout (card path) pre-fills the new
-                # email. Failure is non-fatal — log and keep local row updated;
-                # the next subscribe will retry.
+                # email. We only commit the new email locally if the provider
+                # update succeeds — that way a transient provider failure stays
+                # retriable: next subscribe sees mismatching emails and tries
+                # again. NotImplementedError is treated as success because the
+                # provider can never sync; without that, the local row would be
+                # frozen on the old email forever.
                 try:
                     await adapter.update_customer_email(
                         customer.provider_customer_id, req.email
                     )
                 except NotImplementedError:
-                    pass
+                    logger.info(
+                        "update_customer_email_not_supported",
+                        provider=str(provider),
+                        customer_id=str(customer.id),
+                    )
                 except Exception as e:
                     logger.warning(
                         "update_customer_email_failed",
@@ -110,6 +118,7 @@ class SubscriptionService:
                         provider_customer_id=customer.provider_customer_id,
                         error=str(e),
                     )
+                    return customer
                 customer.email = req.email
             return customer
 

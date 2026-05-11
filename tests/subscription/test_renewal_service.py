@@ -56,3 +56,31 @@ class TestRenewalLifecycle:
         assert payment.merchant_order_no.startswith(
             f"sub_renew_{active_subscription.id}_"
         )
+
+    async def test_renewal_payment_forwards_customer_email_for_prefill(
+        self, session, active_subscription, test_customer, patch_deps
+    ):
+        # App-managed renewals must pre-fill the saved customer email on the
+        # hosted Checkout page (parity with the first-time subscribe path).
+        active_subscription.payment_method = "wechat_pay"
+        active_subscription.current_period_end = (
+            datetime.now(UTC) - timedelta(days=1)
+        )
+        active_subscription.meta = {
+            "_internal": {
+                "success_url": "https://example.com/success",
+                "cancel_url": "https://example.com/cancel",
+                "payment_options": {"client": "web"},
+            }
+        }
+        await session.flush()
+
+        svc = RenewalService(session)
+        with patch("gateway.services.renewal.get_adapter", return_value=patch_deps):
+            await svc.enforce_grace_periods()
+
+        patch_deps.create_payment.assert_called_once()
+        metadata = patch_deps.create_payment.call_args.kwargs["metadata"]
+        assert metadata["customer_email"] == test_customer.email
+        assert metadata["renewal"] == "true"
+        assert metadata["subscription_id"] == str(active_subscription.id)

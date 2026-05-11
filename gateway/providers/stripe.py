@@ -130,10 +130,16 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
         else:
             payment_method_types = kwargs.get("payment_method_types")
 
+        # Strip customer_email out of the metadata dict copied into Stripe — it
+        # belongs only in the top-level customer_email field (used for prefill).
+        # Stripe's own guidance is to keep PII out of metadata.
+        passthrough_metadata = {
+            k: v for k, v in (metadata or {}).items() if k != "customer_email"
+        }
         session_metadata = {
             "merchant_order_no": merchant_order_no,
             "app_id": kwargs.get("app_id", ""),
-            **(metadata or {}),
+            **passthrough_metadata,
         }
 
         session_data = {
