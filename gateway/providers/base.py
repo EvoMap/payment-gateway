@@ -115,6 +115,16 @@ class SubscriptionProviderMixin(ABC):
     ) -> str:
         """创建渠道侧 Customer，返回 customer_id"""
 
+    async def update_customer_email(
+        self,
+        provider_customer_id: str,
+        email: str,
+    ) -> None:
+        """更新渠道侧 Customer email；可选实现，默认未实现。"""
+        raise NotImplementedError(
+            f"{self.provider} does not implement update_customer_email"
+        )
+
     @abstractmethod
     async def create_product_and_price(
         self,

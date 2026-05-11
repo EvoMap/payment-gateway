@@ -357,6 +357,11 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
         )
         return customer.id
 
+    async def update_customer_email(
+        self, provider_customer_id: str, email: str
+    ) -> None:
+        await stripe.Customer.modify_async(provider_customer_id, email=email)
+
     async def create_product_and_price(
         self,
         *,

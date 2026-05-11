@@ -177,6 +177,158 @@ class TestCreateSubscription:
         assert kwargs["currency"] == "CNY"
         assert kwargs["payment_method"] == PaymentMethod.wechat_pay
 
+    async def test_app_managed_passes_email_to_create_payment_metadata(
+        self, session, test_app, basic_plan, patch_deps, mock_adapter
+    ):
+        # Regression: alipay/wechat_pay (app-managed) must forward req.email
+        # into adapter.create_payment(metadata=...) so Stripe Checkout can
+        # pre-fill the email field on the hosted payment page.
+        basic_plan.currency = Currency.CNY
+        await session.flush()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="alipay_email_user",
+            plan_id=basic_plan.id,
+            email="user@example.com",
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+            payment_method=PaymentMethod.alipay,
+        )
+
+        await svc.create_subscription(test_app, req)
+
+        mock_adapter.create_payment.assert_called_once()
+        metadata = mock_adapter.create_payment.call_args.kwargs["metadata"]
+        assert metadata["customer_email"] == "user@example.com"
+        assert metadata["subscription_id"]
+        assert metadata["app_id"]
+
+    async def test_app_managed_omits_customer_email_when_request_lacks_it(
+        self, session, test_app, basic_plan, patch_deps, mock_adapter
+    ):
+        # Without req.email we must NOT inject a None / empty customer_email
+        # key — keeping the metadata minimal avoids polluting Stripe metadata.
+        basic_plan.currency = Currency.CNY
+        await session.flush()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="alipay_no_email_user",
+            plan_id=basic_plan.id,
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+            payment_method=PaymentMethod.alipay,
+        )
+
+        await svc.create_subscription(test_app, req)
+
+        metadata = mock_adapter.create_payment.call_args.kwargs["metadata"]
+        assert "customer_email" not in metadata
+
+    async def test_existing_customer_email_change_synced_to_provider(
+        self, session, test_app, basic_plan, patch_deps, mock_adapter
+    ):
+        # When the same external_user_id subscribes again with a new email,
+        # the gateway must propagate the change to the provider so future
+        # Checkout sessions (card path) pre-fill the new address.
+        from gateway.core.models import Customer
+        from gateway.core.constants import Provider
+
+        existing = Customer(
+            id=uuid.uuid4(),
+            app_id=test_app.id,
+            provider=Provider.stripe,
+            external_user_id="email_change_user",
+            provider_customer_id="cus_existing_001",
+            email="old@example.com",
+        )
+        session.add(existing)
+        await session.flush()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="email_change_user",
+            plan_id=basic_plan.id,
+            email="new@example.com",
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+        )
+
+        await svc.create_subscription(test_app, req)
+
+        mock_adapter.update_customer_email.assert_called_once_with(
+            "cus_existing_001", "new@example.com"
+        )
+        await session.refresh(existing)
+        assert existing.email == "new@example.com"
+
+    async def test_existing_customer_unchanged_email_skips_provider_sync(
+        self, session, test_app, basic_plan, patch_deps, mock_adapter
+    ):
+        # Same email → no provider call (avoid unnecessary API traffic).
+        from gateway.core.models import Customer
+        from gateway.core.constants import Provider
+
+        existing = Customer(
+            id=uuid.uuid4(),
+            app_id=test_app.id,
+            provider=Provider.stripe,
+            external_user_id="same_email_user",
+            provider_customer_id="cus_existing_002",
+            email="same@example.com",
+        )
+        session.add(existing)
+        await session.flush()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="same_email_user",
+            plan_id=basic_plan.id,
+            email="same@example.com",
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+        )
+
+        await svc.create_subscription(test_app, req)
+
+        mock_adapter.update_customer_email.assert_not_called()
+
+    async def test_existing_customer_provider_sync_failure_is_non_fatal(
+        self, session, test_app, basic_plan, patch_deps, mock_adapter
+    ):
+        # Provider call failure must not block the subscribe flow; the local
+        # row should still be updated so subsequent retries can re-sync.
+        from gateway.core.models import Customer
+        from gateway.core.constants import Provider
+
+        existing = Customer(
+            id=uuid.uuid4(),
+            app_id=test_app.id,
+            provider=Provider.stripe,
+            external_user_id="sync_fail_user",
+            provider_customer_id="cus_existing_003",
+            email="old@example.com",
+        )
+        session.add(existing)
+        await session.flush()
+
+        mock_adapter.update_customer_email.side_effect = RuntimeError("stripe down")
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="sync_fail_user",
+            plan_id=basic_plan.id,
+            email="new@example.com",
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+        )
+
+        sub, _ = await svc.create_subscription(test_app, req)
+        assert sub is not None
+        await session.refresh(existing)
+        assert existing.email == "new@example.com"
+
     async def test_create_inactive_plan_rejected(
         self, session, test_app, basic_plan, patch_deps
     ):

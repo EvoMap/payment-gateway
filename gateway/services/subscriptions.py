@@ -94,6 +94,22 @@ class SubscriptionService:
 
         if customer:
             if req.email and customer.email != req.email:
+                # Sync to provider so Checkout (card path) pre-fills the new
+                # email. Failure is non-fatal — log and keep local row updated;
+                # the next subscribe will retry.
+                try:
+                    await adapter.update_customer_email(
+                        customer.provider_customer_id, req.email
+                    )
+                except NotImplementedError:
+                    pass
+                except Exception as e:
+                    logger.warning(
+                        "update_customer_email_failed",
+                        customer_id=str(customer.id),
+                        provider_customer_id=customer.provider_customer_id,
+                        error=str(e),
+                    )
                 customer.email = req.email
             return customer
 
@@ -442,6 +458,16 @@ class SubscriptionService:
                 payment_id = uuid.uuid4()
                 merchant_order_no = f"sub_init_{subscription_id}"
 
+                # Pass customer_email so Stripe Checkout can pre-fill the field
+                # for app-managed methods (alipay / wechat_pay), which create a
+                # mode=payment session and don't bind to the Stripe Customer.
+                payment_metadata = {
+                    "subscription_id": str(subscription_id),
+                    "app_id": str(app.id),
+                }
+                if req.email:
+                    payment_metadata["customer_email"] = req.email
+
                 payment_result = await adapter.create_payment(
                     currency=plan.currency.value,
                     merchant_order_no=merchant_order_no,
@@ -453,10 +479,7 @@ class SubscriptionService:
                     payment_options=req.payment_options,
                     success_url=req.success_url,
                     cancel_url=req.cancel_url,
-                    metadata={
-                        "subscription_id": str(subscription_id),
-                        "app_id": str(app.id),
-                    },
+                    metadata=payment_metadata,
                     app_id=str(app.id),
                     expire_minutes=settings.subscription_checkout_expire_minutes,
                 )
