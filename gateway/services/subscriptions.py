@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gateway.core.models import App, Customer, Plan, Payment, Subscription
 from gateway.core.constants import (
     ALIPAY_SUPPORTED_CURRENCIES,
+    WECHAT_PAY_SUPPORTED_CURRENCIES,
     APP_MANAGED_METHODS,
     SubscriptionStatus,
     ProrationMode,
@@ -297,6 +298,17 @@ class SubscriptionService:
             raise BadRequestException(
                 message=(
                     f"alipay 仅支持 {sorted(ALIPAY_SUPPORTED_CURRENCIES)} 币种，"
+                    f"当前计划币种: {plan.currency.value}"
+                ),
+                code=4006,
+            )
+        if (
+            payment_method == PaymentMethod.wechat_pay.value
+            and plan.currency.value not in WECHAT_PAY_SUPPORTED_CURRENCIES
+        ):
+            raise BadRequestException(
+                message=(
+                    f"wechat_pay 仅支持 {sorted(WECHAT_PAY_SUPPORTED_CURRENCIES)} 币种，"
                     f"当前计划币种: {plan.currency.value}"
                 ),
                 code=4006,

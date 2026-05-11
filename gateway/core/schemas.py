@@ -14,6 +14,7 @@ from gateway.core.constants import (
     Currency,
     PaymentMethod,
     ALIPAY_SUPPORTED_CURRENCIES,
+    WECHAT_PAY_SUPPORTED_CURRENCIES,
     PaymentStatus,
     DeliveryStatus,
     RefundStatus,
@@ -100,6 +101,12 @@ class CreatePaymentRequest(BaseModel):
             if client is not None and client not in ("web", "ios", "android"):
                 raise ValueError(
                     "payment_options.client 值必须为 web / ios / android 之一"
+                )
+            if self.currency.value not in WECHAT_PAY_SUPPORTED_CURRENCIES:
+                supported = sorted(WECHAT_PAY_SUPPORTED_CURRENCIES)
+                raise ValueError(
+                    f"wechat_pay 仅支持 {supported} 币种，"
+                    f"当前: {self.currency.value}"
                 )
         elif self.payment_method == PaymentMethod.alipay:
             if self.payment_options:

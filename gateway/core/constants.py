@@ -13,6 +13,9 @@ class PaymentMethod(str, enum.Enum):
 
 ALIPAY_SUPPORTED_CURRENCIES = frozenset({"CNY", "USD", "HKD", "EUR", "GBP"})
 
+# Stripe wechat_pay 仅支持以下币种作为 Checkout Session currency
+WECHAT_PAY_SUPPORTED_CURRENCIES = frozenset({"CNY", "HKD"})
+
 APP_MANAGED_METHODS = frozenset({PaymentMethod.wechat_pay.value, PaymentMethod.alipay.value})
 
 

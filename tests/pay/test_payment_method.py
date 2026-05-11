@@ -33,6 +33,7 @@ class TestCreatePaymentRequestValidation:
     def test_wechat_pay_valid_clients(self):
         for client in ("web", "ios", "android"):
             req = CreatePaymentRequest(**self._base_payload(
+                currency="CNY",
                 payment_method="wechat_pay",
                 payment_options={"client": client},
             ))
@@ -40,6 +41,7 @@ class TestCreatePaymentRequestValidation:
 
     def test_wechat_pay_no_options_is_valid(self):
         req = CreatePaymentRequest(**self._base_payload(
+            currency="CNY",
             payment_method="wechat_pay",
         ))
         assert req.payment_method == PaymentMethod.wechat_pay
@@ -47,6 +49,7 @@ class TestCreatePaymentRequestValidation:
     def test_wechat_pay_invalid_client_raises(self):
         with pytest.raises(ValueError, match="web / ios / android"):
             CreatePaymentRequest(**self._base_payload(
+                currency="CNY",
                 payment_method="wechat_pay",
                 payment_options={"client": "desktop"},
             ))
@@ -54,9 +57,29 @@ class TestCreatePaymentRequestValidation:
     def test_wechat_pay_extra_keys_raises(self):
         with pytest.raises(ValueError, match="多余字段"):
             CreatePaymentRequest(**self._base_payload(
+                currency="CNY",
                 payment_method="wechat_pay",
                 payment_options={"client": "web", "foo": "bar"},
             ))
+
+    def test_wechat_pay_unsupported_currency_raises(self):
+        # USD is not in WECHAT_PAY_SUPPORTED_CURRENCIES (Stripe limits wechat_pay to CNY/HKD)
+        with pytest.raises(ValueError, match="wechat_pay 仅支持"):
+            CreatePaymentRequest(**self._base_payload(
+                currency="USD",
+                payment_method="wechat_pay",
+                payment_options={"client": "web"},
+            ))
+
+    def test_wechat_pay_supported_currencies(self):
+        for cur in ("CNY", "HKD"):
+            req = CreatePaymentRequest(**self._base_payload(
+                currency=cur,
+                payment_method="wechat_pay",
+                payment_options={"client": "web"},
+            ))
+            assert req.payment_method == PaymentMethod.wechat_pay
+            assert req.currency.value == cur
 
     def test_alipay_rejects_payment_options(self):
         with pytest.raises(ValueError, match="alipay 不需要 payment_options"):

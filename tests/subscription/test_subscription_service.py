@@ -87,6 +87,10 @@ class TestCreateSubscription:
     async def test_app_managed_trial_starts_without_initial_payment(
         self, session, test_app, basic_plan, patch_deps
     ):
+        # wechat_pay only supports CNY/HKD; align fixture with currency validation.
+        basic_plan.currency = Currency.CNY
+        await session.flush()
+
         svc = SubscriptionService(session)
         req = CreateSubscriptionRequest(
             external_user_id="wechat_trial_user",
@@ -130,6 +134,49 @@ class TestCreateSubscription:
         with pytest.raises(BadRequestException, match="alipay 仅支持"):
             await svc.create_subscription(test_app, req)
 
+    async def test_app_managed_wechat_rejects_unsupported_plan_currency(
+        self, session, test_app, basic_plan, patch_deps
+    ):
+        # Stripe wechat_pay only supports CNY/HKD; USD plan must be rejected upfront.
+        basic_plan.currency = Currency.USD
+        await session.flush()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="wechat_usd_user",
+            plan_id=basic_plan.id,
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+            payment_method=PaymentMethod.wechat_pay,
+        )
+
+        with pytest.raises(BadRequestException, match="wechat_pay 仅支持"):
+            await svc.create_subscription(test_app, req)
+
+    async def test_app_managed_wechat_accepts_cny_plan(
+        self, session, test_app, basic_plan, patch_deps, mock_adapter
+    ):
+        # CNY plan should pass currency validation and proceed to create_payment.
+        basic_plan.currency = Currency.CNY
+        await session.flush()
+
+        svc = SubscriptionService(session)
+        req = CreateSubscriptionRequest(
+            external_user_id="wechat_cny_user",
+            plan_id=basic_plan.id,
+            success_url="https://example.com/success",
+            cancel_url="https://example.com/cancel",
+            payment_method=PaymentMethod.wechat_pay,
+        )
+
+        sub, _checkout_url = await svc.create_subscription(test_app, req)
+        assert sub.payment_method == PaymentMethod.wechat_pay.value
+        # adapter.create_payment must have been invoked with CNY + wechat_pay
+        mock_adapter.create_payment.assert_called_once()
+        kwargs = mock_adapter.create_payment.call_args.kwargs
+        assert kwargs["currency"] == "CNY"
+        assert kwargs["payment_method"] == PaymentMethod.wechat_pay
+
     async def test_create_inactive_plan_rejected(
         self, session, test_app, basic_plan, patch_deps
     ):
@@ -167,6 +214,8 @@ class TestCreateSubscription:
     async def test_create_app_managed_without_provider_price_allowed(
         self, session, test_app, basic_plan, patch_deps
     ):
+        # wechat_pay only supports CNY/HKD; align fixture with currency validation.
+        basic_plan.currency = Currency.CNY
         basic_plan.provider_price_id = None
         await session.flush()
 
