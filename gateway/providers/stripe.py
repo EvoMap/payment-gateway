@@ -11,7 +11,7 @@ import httpx
 import stripe
 
 from gateway.core.logging import get_logger
-from gateway.core.constants import Provider, EventCategory
+from gateway.core.constants import Provider, EventCategory, APP_MANAGED_METHODS, Currency
 from gateway.core.settings import get_settings
 from gateway.core.exceptions import (
     IgnoredException,
@@ -178,7 +178,7 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
                 "wechat_pay": {"client": client}
             }
 
-        if method_type in ("wechat_pay", "alipay") and currency.lower() != "cny":
+        if method_type in APP_MANAGED_METHODS and currency.upper() != Currency.CNY.value:
             session_data["adaptive_pricing"] = {"enabled": True}
 
         if expire_minutes:
