@@ -178,6 +178,9 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
                 "wechat_pay": {"client": client}
             }
 
+        if method_type in ("wechat_pay", "alipay") and currency.lower() != "cny":
+            session_data["adaptive_pricing"] = {"enabled": True}
+
         if expire_minutes:
             expire_seconds = max(1800, min(expire_minutes * 60, 86400))
             session_data["expires_at"] = int(time.time() + expire_seconds)
@@ -742,6 +745,17 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
                 "checkout.session.expired": "canceled",
             }
             outcome = outcome_map.get(event_type, "unknown")
+
+        # Log adaptive_pricing currency conversion for reconciliation auditing.
+        currency_conversion = event_data.get("currency_conversion")
+        if currency_conversion:
+            logger.info(
+                "adaptive_pricing conversion detected",
+                merchant_order_no=merchant_order_no,
+                source_currency=currency_conversion.get("source_currency"),
+                destination_currency=currency_conversion.get("destination_currency"),
+                amount_total=event_data.get("amount_total"),
+            )
 
         return CallbackEvent(
             provider=self.provider,

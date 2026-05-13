@@ -63,16 +63,15 @@ class TestCreatePaymentRequestValidation:
             ))
 
     def test_wechat_pay_unsupported_currency_raises(self):
-        # USD is not in WECHAT_PAY_SUPPORTED_CURRENCIES (Stripe limits wechat_pay to CNY/HKD)
         with pytest.raises(ValueError, match="wechat_pay 仅支持"):
             CreatePaymentRequest(**self._base_payload(
-                currency="USD",
+                currency="INR",
                 payment_method="wechat_pay",
                 payment_options={"client": "web"},
             ))
 
     def test_wechat_pay_supported_currencies(self):
-        for cur in ("CNY", "HKD"):
+        for cur in ("CNY", "HKD", "USD", "EUR", "GBP", "JPY"):
             req = CreatePaymentRequest(**self._base_payload(
                 currency=cur,
                 payment_method="wechat_pay",
@@ -265,6 +264,88 @@ class TestStripeSessionBuilder:
             retry_kwargs = mock_create.call_args_list[1][1]
             assert retry_kwargs["payment_method_types"] == ["card"]
             assert "payment_intent_data" in retry_kwargs
+
+    @pytest.mark.asyncio
+    async def test_adaptive_pricing_enabled_for_usd_wechat_pay(self, adapter):
+        """USD + wechat_pay 时启用 adaptive_pricing"""
+        mock_session = MagicMock()
+        mock_session.url = "https://checkout.stripe.com/session/ap1"
+        mock_session.id = "cs_test_ap1"
+
+        with patch("stripe.checkout.Session.create_async", new_callable=AsyncMock, return_value=mock_session) as mock_create:
+            await adapter.create_payment(
+                currency="USD",
+                merchant_order_no="TEST_AP_001",
+                quantity=1,
+                unit_amount=2000,
+                notify_url="https://example.com/notify",
+                payment_method=PaymentMethod.wechat_pay,
+                payment_options={"client": "web"},
+            )
+
+            call_kwargs = mock_create.call_args[1]
+            assert call_kwargs["adaptive_pricing"] == {"enabled": True}
+
+    @pytest.mark.asyncio
+    async def test_adaptive_pricing_enabled_for_usd_alipay(self, adapter):
+        """USD + alipay 时启用 adaptive_pricing"""
+        mock_session = MagicMock()
+        mock_session.url = "https://checkout.stripe.com/session/ap2"
+        mock_session.id = "cs_test_ap2"
+
+        with patch("stripe.checkout.Session.create_async", new_callable=AsyncMock, return_value=mock_session) as mock_create:
+            await adapter.create_payment(
+                currency="USD",
+                merchant_order_no="TEST_AP_002",
+                quantity=1,
+                unit_amount=2000,
+                notify_url="https://example.com/notify",
+                payment_method=PaymentMethod.alipay,
+            )
+
+            call_kwargs = mock_create.call_args[1]
+            assert call_kwargs["adaptive_pricing"] == {"enabled": True}
+
+    @pytest.mark.asyncio
+    async def test_adaptive_pricing_not_set_for_cny_wechat_pay(self, adapter):
+        """CNY + wechat_pay 时不启用 adaptive_pricing（无需转换）"""
+        mock_session = MagicMock()
+        mock_session.url = "https://checkout.stripe.com/session/ap3"
+        mock_session.id = "cs_test_ap3"
+
+        with patch("stripe.checkout.Session.create_async", new_callable=AsyncMock, return_value=mock_session) as mock_create:
+            await adapter.create_payment(
+                currency="CNY",
+                merchant_order_no="TEST_AP_003",
+                quantity=1,
+                unit_amount=9900,
+                notify_url="https://example.com/notify",
+                payment_method=PaymentMethod.wechat_pay,
+                payment_options={"client": "web"},
+            )
+
+            call_kwargs = mock_create.call_args[1]
+            assert "adaptive_pricing" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_adaptive_pricing_not_set_for_card(self, adapter):
+        """card 支付不启用 adaptive_pricing"""
+        mock_session = MagicMock()
+        mock_session.url = "https://checkout.stripe.com/session/ap4"
+        mock_session.id = "cs_test_ap4"
+
+        with patch("stripe.checkout.Session.create_async", new_callable=AsyncMock, return_value=mock_session) as mock_create:
+            await adapter.create_payment(
+                currency="USD",
+                merchant_order_no="TEST_AP_004",
+                quantity=1,
+                unit_amount=2000,
+                notify_url="https://example.com/notify",
+                payment_method=PaymentMethod.card,
+            )
+
+            call_kwargs = mock_create.call_args[1]
+            assert "adaptive_pricing" not in call_kwargs
 
     @pytest.mark.asyncio
     async def test_no_fallback_when_explicit_payment_method(self, adapter):
