@@ -197,8 +197,32 @@ class StripeAdapter(ProviderAdapter, SubscriptionProviderMixin):
             )
         except stripe.error.InvalidRequestError as e:
             error_msg = str(e)
-            # fallback 仅适用于未显式指定 payment_method 的场景（如 app 配置了不兼容的默认类型）
+            # wechat_pay currency fallback: Stripe test mode only supports
+            # CNY/HKD for wechat_pay sessions. Retry with HKD when the
+            # original currency is rejected.
             if (
+                "currency" in error_msg.lower()
+                and method_type == "wechat_pay"
+                and currency.upper() not in ("CNY", "HKD")
+            ):
+                session_data["line_items"][0]["price_data"]["currency"] = "hkd"
+                session_data.pop("adaptive_pricing", None)
+                try:
+                    session = await stripe.checkout.Session.create_async(
+                        **session_data
+                    )
+                    return ProviderPaymentResult(
+                        type=PaymentTypeEnum.url,
+                        payload={
+                            "checkout_url": session.url,
+                            "session_id": session.id,
+                        },
+                        provider_txn_id=session.id,
+                    )
+                except stripe.StripeError:
+                    raise
+            # fallback 仅适用于未显式指定 payment_method 的场景（如 app 配置了不兼容的默认类型）
+            elif (
                 "payment_method" in error_msg.lower()
                 and session_data.get("payment_method_types") != ["card"]
                 and not payment_method
